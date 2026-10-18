@@ -331,7 +331,7 @@ export default function ProjectsDashboardPage() {
             </div>
 
             <p className="text-xs text-gray-700 bg-gray-50 p-3.5 rounded-xl border border-gray-200 leading-relaxed">
-              Deseja realmente apagar a produção <strong className="text-black font-bold">"{projectToDelete.title}"</strong>?
+              Deseja realmente apagar a produção <strong className="text-black font-bold">&quot;{projectToDelete.title}&quot;</strong>?
               Todas as lâminas e composições vinculadas a este rascunho serão removidas permanentemente.
             </p>
 

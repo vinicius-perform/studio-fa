@@ -1,31 +1,91 @@
+// src/app/login/page.tsx
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
-import { Lock, Mail, AlertCircle } from 'lucide-react';
+import { Lock, Mail, AlertCircle, Loader2 } from 'lucide-react';
+import { getDefaultRouteForRole } from '@/lib/auth/permissions';
 
-export default function LoginPage() {
+function LoginForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const nextParam = searchParams.get('next');
+  const errorParam = searchParams.get('error');
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (errorParam === 'connection') {
+      setError('Não foi possível conectar ao Studio FA. Tente novamente mais tarde.');
+    } else if (errorParam === 'unconfigured') {
+      setError('Configuração do Supabase ausente ou incorreta.');
+    }
+  }, [errorParam]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
 
-    const supabase = getSupabaseBrowserClient();
-    const { error: authErr } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const { data: authData, error: authErr } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
 
-    if (authErr) {
-      setError(authErr.message);
+      if (authErr) {
+        if (
+          authErr.message.includes('Invalid login credentials') ||
+          authErr.message.includes('invalid_grant')
+        ) {
+          setError('E-mail ou senha incorretos. Verifique suas credenciais.');
+        } else if (authErr.message.includes('Email not confirmed')) {
+          setError('Seu e-mail ainda não foi confirmado. Verifique sua caixa de entrada.');
+        } else {
+          setError(authErr.message || 'Falha ao autenticar.');
+        }
+        setLoading(false);
+        return;
+      }
+
+      const user = authData?.user;
+      if (!user) {
+        setError('Falha ao obter dados do usuário autenticado.');
+        setLoading(false);
+        return;
+      }
+
+      // Validação de Membership na Organização
+      const { data: memberData, error: memberErr } = await (supabase as any)
+        .from('organization_members')
+        .select('role, organization_id')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      const member = memberData as any;
+
+      if (memberErr || !member) {
+        // Usuário autenticado mas sem membership -> Bloquear e fazer signOut imediato
+        await supabase.auth.signOut();
+        setError('Seu usuário ainda não possui acesso ao Studio FA. Solicite um convite a um administrador.');
+        setLoading(false);
+        return;
+      }
+
+      // Redirecionamento por Role
+      const targetRoute = nextParam || getDefaultRouteForRole(member.role);
+      router.push(targetRoute);
+      router.refresh();
+    } catch (err: any) {
+      setError(err?.message || 'Ocorreu um erro inesperado ao conectar ao Studio FA.');
       setLoading(false);
-    } else {
-      window.location.href = '/';
     }
   };
 
@@ -33,18 +93,18 @@ export default function LoginPage() {
     <div className="flex min-h-screen w-full items-center justify-center bg-canvas-bg p-4">
       <div className="w-full max-w-md bg-canvas-card border border-canvas-border rounded-2xl p-8 shadow-sm">
         <div className="flex items-center gap-3 mb-6 justify-center">
-          <div className="w-10 h-10 rounded-lg bg-fa-green flex items-center justify-center font-bold text-black text-base">
+          <div className="w-10 h-10 rounded-lg bg-fa-green flex items-center justify-center font-bold text-black text-base shadow-sm">
             FA
           </div>
           <div>
             <h1 className="font-bold text-xl text-gray-900 tracking-tight">Studio FA</h1>
-            <p className="text-xs text-gray-500">Acesso Restrito — Equipe Interna</p>
+            <p className="text-xs text-gray-500">Acesso Restrito — Equipe e Convidados</p>
           </div>
         </div>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
+          <div className="mb-4 p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2.5 leading-relaxed">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
@@ -57,6 +117,7 @@ export default function LoginPage() {
               <input
                 type="email"
                 required
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="seu.nome@agenciafa.com.br"
@@ -72,6 +133,7 @@ export default function LoginPage() {
               <input
                 type="password"
                 required
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
@@ -83,9 +145,16 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 px-4 bg-fa-dark hover:bg-black text-white font-semibold rounded-lg text-sm transition-colors shadow-sm disabled:opacity-50"
+            className="w-full py-2.5 px-4 bg-fa-dark hover:bg-black text-white font-semibold rounded-lg text-sm transition-colors shadow-sm disabled:opacity-50 flex items-center justify-center gap-2"
           >
-            {loading ? 'Autenticando...' : 'Entrar no Studio FA'}
+            {loading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Autenticando...</span>
+              </>
+            ) : (
+              'Entrar no Studio FA'
+            )}
           </button>
         </form>
 
@@ -94,5 +163,19 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-canvas-bg">
+          <Loader2 className="w-8 h-8 animate-spin text-fa-green" />
+        </div>
+      }
+    >
+      <LoginForm />
+    </React.Suspense>
   );
 }

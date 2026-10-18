@@ -146,6 +146,8 @@ class DevDataStore {
   private cache: DevStoreData | null = null;
 
   private load(): DevStoreData {
+    if (this.cache) return this.cache;
+
     try {
       if (fs.existsSync(DATA_FILE_PATH)) {
         const raw = fs.readFileSync(DATA_FILE_PATH, 'utf-8');
@@ -181,7 +183,7 @@ class DevDataStore {
     if (!toSave) return;
     this.cache = toSave;
     try {
-      fs.writeFileSync(DATA_FILE_PATH, JSON.stringify(toSave, null, 2), 'utf-8');
+      fs.writeFileSync(DATA_FILE_PATH, JSON.stringify(toSave), 'utf-8');
     } catch (e) {
       console.error('Falha ao persistir .dev-store-data.json:', e);
     }
@@ -431,6 +433,26 @@ class DevDataStore {
     const removed = data.projects.length < initLen;
     if (removed) this.save(data);
     return removed;
+  }
+
+  updateProject(id: string, updates: any) {
+    const data = this.load();
+    const projIdx = data.projects.findIndex((p) => p.id === id);
+    if (projIdx !== -1) {
+      data.projects[projIdx] = {
+        ...data.projects[projIdx],
+        ...updates,
+        updated_at: new Date().toISOString(),
+      };
+      this.save(data);
+      return data.projects[projIdx];
+    }
+    return null;
+  }
+
+  getComposition(slideId: string) {
+    const data = this.load();
+    return data.compositions.find((c) => c.slide_id === slideId) || null;
   }
 
   updateComposition(slideId: string, doc: any, expectedRevision: number) {

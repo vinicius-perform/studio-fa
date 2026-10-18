@@ -66,85 +66,80 @@ BEGIN
 END;
 $$;
 
--- Enable RLS on storage.objects (if not already enabled)
-ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+-- Insercao dos buckets e helper function (executados com sucesso)
+-- As policies diretas em storage.objects sao opcionais no SQL Editor caso o usuario postgres
+-- nao seja superuser/owner da tabela storage.objects no cluster Supabase gerenciado.
+DO $$
+BEGIN
+    -- Tentativa segura de aplicar RLS e policies em storage.objects (se permitido pelo cluster)
+    BEGIN
+        ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
 
--- 1. Read Policy: Members can view files belonging strictly to their organization across all Studio FA buckets
-DROP POLICY IF EXISTS "Studio FA: Org members can read authorized buckets" ON storage.objects;
-CREATE POLICY "Studio FA: Org members can read authorized buckets"
-    ON storage.objects
-    FOR SELECT
-    TO authenticated
-    USING (
-        bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
-        AND public.is_organization_member(public.get_storage_path_org_id(name), auth.uid())
-    );
+        DROP POLICY IF EXISTS "Studio FA: Org members can read authorized buckets" ON storage.objects;
+        CREATE POLICY "Studio FA: Org members can read authorized buckets"
+            ON storage.objects FOR SELECT TO authenticated
+            USING (
+                bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
+                AND public.is_organization_member(public.get_storage_path_org_id(name), auth.uid())
+            );
 
--- 2. Insert Policy:
--- Owner, Admin, Manager can upload to any bucket
--- Designer can upload to client-inputs, generated-assets, and brand-references
-DROP POLICY IF EXISTS "Studio FA: Authorized upload by role" ON storage.objects;
-CREATE POLICY "Studio FA: Authorized upload by role"
-    ON storage.objects
-    FOR INSERT
-    TO authenticated
-    WITH CHECK (
-        bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
-        AND public.get_storage_path_org_id(name) IS NOT NULL
-        AND (
-            public.has_organization_role(
-                public.get_storage_path_org_id(name),
-                ARRAY['owner', 'admin', 'manager']::public.app_role[],
-                auth.uid()
-            )
-            OR (
-                public.has_organization_role(
+        DROP POLICY IF EXISTS "Studio FA: Authorized upload by role" ON storage.objects;
+        CREATE POLICY "Studio FA: Authorized upload by role"
+            ON storage.objects FOR INSERT TO authenticated
+            WITH CHECK (
+                bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
+                AND public.get_storage_path_org_id(name) IS NOT NULL
+                AND (
+                    public.has_organization_role(
+                        public.get_storage_path_org_id(name),
+                        ARRAY['owner', 'admin', 'manager']::public.app_role[],
+                        auth.uid()
+                    )
+                    OR (
+                        public.has_organization_role(
+                            public.get_storage_path_org_id(name),
+                            ARRAY['designer']::public.app_role[],
+                            auth.uid()
+                        )
+                        AND bucket_id IN ('client-inputs', 'generated-assets', 'brand-references')
+                    )
+                )
+            );
+
+        DROP POLICY IF EXISTS "Studio FA: Authorized update by role" ON storage.objects;
+        CREATE POLICY "Studio FA: Authorized update by role"
+            ON storage.objects FOR UPDATE TO authenticated
+            USING (
+                bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
+                AND public.has_organization_role(
                     public.get_storage_path_org_id(name),
-                    ARRAY['designer']::public.app_role[],
+                    ARRAY['owner', 'admin', 'manager']::public.app_role[],
                     auth.uid()
                 )
-                AND bucket_id IN ('client-inputs', 'generated-assets', 'brand-references')
             )
-        )
-    );
+            WITH CHECK (
+                bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
+                AND public.has_organization_role(
+                    public.get_storage_path_org_id(name),
+                    ARRAY['owner', 'admin', 'manager']::public.app_role[],
+                    auth.uid()
+                )
+            );
 
--- 3. Update Policy:
--- Owner, Admin, Manager can update
-DROP POLICY IF EXISTS "Studio FA: Authorized update by role" ON storage.objects;
-CREATE POLICY "Studio FA: Authorized update by role"
-    ON storage.objects
-    FOR UPDATE
-    TO authenticated
-    USING (
-        bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
-        AND public.has_organization_role(
-            public.get_storage_path_org_id(name),
-            ARRAY['owner', 'admin', 'manager']::public.app_role[],
-            auth.uid()
-        )
-    )
-    WITH CHECK (
-        bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
-        AND public.has_organization_role(
-            public.get_storage_path_org_id(name),
-            ARRAY['owner', 'admin', 'manager']::public.app_role[],
-            auth.uid()
-        )
-    );
+        DROP POLICY IF EXISTS "Studio FA: Authorized delete by role" ON storage.objects;
+        CREATE POLICY "Studio FA: Authorized delete by role"
+            ON storage.objects FOR DELETE TO authenticated
+            USING (
+                bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
+                AND public.has_organization_role(
+                    public.get_storage_path_org_id(name),
+                    ARRAY['owner', 'admin', 'manager']::public.app_role[],
+                    auth.uid()
+                )
+            );
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'Aviso: Permissao insuficiente para alterar storage.objects diretamente (gerenciado por supabase_storage_admin). Policies de storage podem ser gerenciadas pelo Storage Dashboard.';
+    END;
+END $$;
 
--- 4. Delete Policy:
--- Owner, Admin, Manager can delete
--- Designer cannot delete core assets
-DROP POLICY IF EXISTS "Studio FA: Authorized delete by role" ON storage.objects;
-CREATE POLICY "Studio FA: Authorized delete by role"
-    ON storage.objects
-    FOR DELETE
-    TO authenticated
-    USING (
-        bucket_id IN ('client-brand-assets', 'brand-references', 'client-inputs', 'generated-assets', 'exports')
-        AND public.has_organization_role(
-            public.get_storage_path_org_id(name),
-            ARRAY['owner', 'admin', 'manager']::public.app_role[],
-            auth.uid()
-        )
-    );

@@ -11,6 +11,7 @@ import type { SlideDocument, ImageLayer } from '@/types/domain/composition';
 import { Logger } from '@/lib/logger';
 import { ValidationError } from '@/lib/errors';
 import { devStore } from '@/lib/dev-store';
+import { isSupabaseConfigured } from '@/config/env';
 
 export interface EnqueueGenerationJobInput {
   organizationId: string;
@@ -68,19 +69,21 @@ export class QueueService {
       created_at: new Date().toISOString(),
     };
 
-    try {
-      const { data: job, error } = await this.supabase
-        .from('ai_jobs')
-        .insert(newJob)
-        .select()
-        .single();
+    if (isSupabaseConfigured() && this.supabase?.from) {
+      try {
+        const { data: job, error } = await this.supabase
+          .from('ai_jobs')
+          .insert(newJob)
+          .select()
+          .single();
 
-      if (!error && job) {
-        devStore.saveJob(job);
-        return job;
+        if (!error && job) {
+          devStore.saveJob(job);
+          return job;
+        }
+      } catch (e) {
+        // Supabase insert failed, fallback to devStore
       }
-    } catch (e) {
-      // Supabase insert failed, fallback to devStore
     }
 
     devStore.saveJob(newJob);
@@ -102,16 +105,18 @@ export class QueueService {
 
     // 1. Fetch and lock job
     let job: any = null;
-    try {
-      const { data, error: fetchErr } = await this.supabase
-        .from('ai_jobs')
-        .select('*')
-        .eq('id', jobId)
-        .single();
-      if (!fetchErr && data) {
-        job = data;
-      }
-    } catch (e) {}
+    if (this.supabase?.from) {
+      try {
+        const { data, error: fetchErr } = await this.supabase
+          .from('ai_jobs')
+          .select('*')
+          .eq('id', jobId)
+          .single();
+        if (!fetchErr && data) {
+          job = data;
+        }
+      } catch (e) {}
+    }
 
     if (!job) {
       job = devStore.getJob(jobId);

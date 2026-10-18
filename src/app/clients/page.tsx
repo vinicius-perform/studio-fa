@@ -359,8 +359,9 @@ export default function ClientsPage() {
         setClients((prev) => [client, ...prev.filter((c) => c.id !== client.id)]);
       }
 
+      const clientName = client?.name || formData.name;
       setShowCreateModal(false);
-      setSuccessToast(`Cliente "${client.name}" cadastrado com sucesso!`);
+      setSuccessToast(`Cliente "${clientName}" cadastrado com sucesso!`);
       setTimeout(() => setSuccessToast(null), 4000);
 
       // Reset form
@@ -481,16 +482,13 @@ export default function ClientsPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => {
-                setErrorMessage(null);
-                setShowCreateModal(true);
-              }}
+            <Link
+              href="/clients/new"
               className="px-4 py-2.5 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-sm"
             >
               <UserPlus className="w-4 h-4" />
               <span>Novo Cliente</span>
-            </button>
+            </Link>
 
             <Link
               href="/create"
@@ -567,16 +565,13 @@ export default function ClientsPage() {
                   : 'Tente ajustar os filtros de busca para encontrar o cliente desejado.'}
               </p>
               {clients.length === 0 && (
-                <button
-                  onClick={() => {
-                    setErrorMessage(null);
-                    setShowCreateModal(true);
-                  }}
+                <Link
+                  href="/clients/new"
                   className="px-5 py-2.5 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs inline-flex items-center gap-2 transition shadow-sm"
                 >
                   <UserPlus className="w-4 h-4" />
                   <span>Cadastrar Primeiro Cliente</span>
-                </button>
+                </Link>
               )}
             </div>
           ) : (
@@ -606,7 +601,10 @@ export default function ClientsPage() {
                     <div className="p-5 space-y-4">
                       {/* Header with Avatar/Logo and Status */}
                       <div className="flex items-start justify-between">
-                        <div className="flex items-center gap-3">
+                        <Link
+                          href={`/clients/${client.id}`}
+                          className="flex items-center gap-3 group-hover:opacity-90 transition"
+                        >
                           <div className="w-12 h-12 rounded-xl bg-zinc-950 border border-gray-200 flex items-center justify-center font-bold text-sm text-[#CEF52A] uppercase shadow-2xs overflow-hidden shrink-0">
                             {client.logoAsset?.storage_path ? (
                               <img
@@ -619,7 +617,7 @@ export default function ClientsPage() {
                             )}
                           </div>
                           <div>
-                            <h3 className="font-bold text-gray-900 text-sm group-hover:text-black">
+                            <h3 className="font-bold text-gray-900 text-sm group-hover:text-black hover:underline">
                               {client.name}
                             </h3>
                             <div className="flex items-center gap-2 mt-0.5">
@@ -633,7 +631,7 @@ export default function ClientsPage() {
                               )}
                             </div>
                           </div>
-                        </div>
+                        </Link>
 
                         {getStatusBadge(client.brand_status)}
                       </div>
@@ -681,17 +679,28 @@ export default function ClientsPage() {
 
                     {/* Card Actions Footer */}
                     <div className="p-4 bg-gray-50/70 border-t border-gray-100 flex items-center justify-between">
-                      <button
-                        onClick={() => setPiecesModalClient(client)}
-                        className="text-xs font-semibold text-gray-700 hover:text-black flex items-center gap-1.5 transition py-1 px-2 rounded-lg hover:bg-gray-100"
-                        title="Ver e gerenciar peças de referência visual do cliente"
-                      >
-                        <FolderKanban className="w-3.5 h-3.5 text-black" />
-                        <span>Ver Peças</span>
-                        <span className="text-[10px] bg-black/10 text-gray-800 font-bold px-1.5 py-0.2 rounded-full">
-                          {client.referenceCount || 0}
-                        </span>
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <Link
+                          href={`/clients/${client.id}`}
+                          className="text-xs font-semibold text-gray-700 hover:text-black flex items-center gap-1.5 transition py-1 px-2 rounded-lg hover:bg-gray-100"
+                          title="Ver perfil completo e DNA visual do cliente"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-black" />
+                          <span>Perfil & DNA</span>
+                        </Link>
+
+                        <button
+                          onClick={() => setPiecesModalClient(client)}
+                          className="text-xs font-semibold text-gray-700 hover:text-black flex items-center gap-1.5 transition py-1 px-2 rounded-lg hover:bg-gray-100"
+                          title="Ver e gerenciar peças de referência visual do cliente"
+                        >
+                          <FolderKanban className="w-3.5 h-3.5 text-black" />
+                          <span>Peças</span>
+                          <span className="text-[10px] bg-black/10 text-gray-800 font-bold px-1.5 py-0.2 rounded-full">
+                            {client.referenceCount || 0}
+                          </span>
+                        </button>
+                      </div>
 
                       <div className="flex items-center gap-1.5">
                         <button

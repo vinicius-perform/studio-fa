@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "npx tsx --test tests/*.test.ts",
+    "bootstrap:admin": "npx tsx scripts/bootstrap-admin.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.1",

@@ -1,124 +1,206 @@
 // src/app/api/clients/route.ts
 import { NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
-import { ClientService } from '@/services/clients/client.service';
+import { requireSessionContext, AuthError, ForbiddenError } from '@/lib/auth/server-guards';
+import { isAdmin } from '@/lib/auth/permissions';
 import { formatError } from '@/lib/errors';
 import { devStore } from '@/lib/dev-store';
+import { isDevStoreAllowed } from '@/config/env';
+import { StorageService } from '@/services/storage/storage.service';
+import { VisualAnalyzerService } from '@/services/ai/visual-analyzer.service';
+
+/**
+ * Normaliza o identificador do Instagram para o formato padrão @usuario.
+ */
+function normalizeInstagramHandle(raw?: string | null): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let clean = raw.trim();
+  clean = clean.replace(/^(https?:\/\/)?(www\.)?instagram\.com\//i, '');
+  clean = clean.replace(/\/.*$/, ''); // remove subdiretórios
+  clean = clean.replace(/^@+/, ''); // remove @ extra
+  clean = clean.trim();
+  return clean ? `@${clean}` : null;
+}
 
 export async function GET(req: Request) {
   try {
-    const supabase = getSupabaseServerClient();
-    const { searchParams } = new URL(req.url);
+    if (isDevStoreAllowed()) {
+      const localClients = devStore.listClients();
+      return NextResponse.json({ clients: localClients });
+    }
 
-    // Default to the first organization if not specified
-    let orgId = searchParams.get('organizationId');
-    if (!orgId) {
-      try {
-        const { data: org } = await supabase.from('organizations').select('id').limit(1).single();
-        orgId = (org as any)?.id || null;
-      } catch {
-        orgId = null;
+    const supabase = getSupabaseServerClient();
+    const session = await requireSessionContext(supabase);
+
+    let query = supabase
+      .from('clients')
+      .select('id, organization_id, name, slug, niche, instagram_handle, website, status, brand_status, dna, manual_guidelines, visual_memory_status, created_at, updated_at')
+      .eq('organization_id', session.organizationId)
+      .neq('status', 'archived')
+      .order('name', { ascending: true });
+
+    if (!isAdmin(session.role)) {
+      if (session.assignedClientIds.length === 0) {
+        return NextResponse.json({ clients: [] });
+      }
+      query = query.in('id', session.assignedClientIds);
+    }
+
+    const { data: rawClients, error: clientsErr } = await query;
+    let clients: any[] = (rawClients || []) as any[];
+
+    if (clientsErr) {
+      if (clientsErr.code === '42703') {
+        // Fallback resiliente caso o banco remoto ainda esteja executando a delta migration
+        let fallbackQuery = supabase
+          .from('clients')
+          .select('id, organization_id, name, slug, niche, instagram_handle, website, status, brand_status, created_at, updated_at')
+          .eq('organization_id', session.organizationId)
+          .neq('status', 'archived')
+          .order('name', { ascending: true });
+
+        if (!isAdmin(session.role)) {
+          if (session.assignedClientIds.length === 0) {
+            return NextResponse.json({ clients: [] });
+          }
+          fallbackQuery = fallbackQuery.in('id', session.assignedClientIds);
+        }
+
+        const { data: fallbackClients, error: fallbackErr } = await fallbackQuery;
+        if (fallbackErr) {
+          return NextResponse.json({ error: { message: fallbackErr.message } }, { status: 503 });
+        }
+        clients = (fallbackClients || []).map((c: any) => ({
+          ...c,
+          dna: null,
+          manual_guidelines: null,
+          visual_memory_status: 'awaiting_references',
+        }));
+      } else {
+        console.error('Erro ao consultar clients no Supabase:', clientsErr);
+        return NextResponse.json(
+          { error: { message: 'Não foi possível consultar os clientes. Tente novamente.' } },
+          { status: 503 }
+        );
       }
     }
 
-    // 1. Always load local clients (guaranteed permanent local persistence)
-    const localClients = devStore.listClients();
+    // Popula perfis de marca, peças e signed URLs dos logos
+    const populatedClients = await Promise.all(
+      (clients || []).map(async (c: any) => {
+        const { data: profileData } = await (supabase as any)
+          .from('brand_profiles')
+          .select('id, version, summary, colors, typography, graphical_elements')
+          .eq('client_id', c.id)
+          .eq('status', 'approved')
+          .maybeSingle();
 
-    // 2. Also query Supabase if available
-    let remoteClients: any[] = [];
-    if (orgId) {
-      try {
-        const clientService = new ClientService(supabase);
-        const clients = await clientService.list(orgId);
+        const { data: logoAssetData } = await (supabase as any)
+          .from('client_assets')
+          .select('storage_bucket, storage_path, original_filename')
+          .eq('client_id', c.id)
+          .eq('asset_type', 'logo_primary')
+          .maybeSingle();
 
-        if (clients && clients.length > 0) {
-          remoteClients = await Promise.all(
-            clients.map(async (c) => {
-              const { data: profile } = await supabase
-                .from('brand_profiles')
-                .select('id, version, summary, colors, typography, graphical_elements')
-                .eq('client_id', c.id)
-                .eq('status', 'approved')
-                .maybeSingle();
+        // Contagem de peças cadastradas
+        let piecesCount = 0;
+        try {
+          const { count } = await (supabase as any)
+            .from('client_pieces')
+            .select('*', { count: 'exact', head: true })
+            .eq('client_id', c.id);
+          piecesCount = count || 0;
+        } catch {
+          piecesCount = 0;
+        }
 
-              const { data: logoAsset } = await supabase
-                .from('client_assets')
-                .select('id, storage_path, original_filename')
-                .eq('client_id', c.id)
-                .in('asset_type', ['logo_primary', 'logo_monochrome'])
-                .order('created_at', { ascending: false })
-                .limit(1)
-                .maybeSingle();
+        const profile = profileData as any;
+        const logoAsset = logoAssetData as any;
+        const colorsObj = (profile?.colors as any) || {};
 
-              const { count: refCount } = await supabase
-                .from('brand_references')
-                .select('id', { count: 'exact', head: true })
-                .eq('client_id', c.id);
-
-              return {
-                ...c,
-                brandProfile: profile,
-                logoAsset,
-                referenceCount: refCount || 0,
-              };
-            })
+        let logoSignedUrl: string | null = null;
+        if (logoAsset?.storage_path) {
+          logoSignedUrl = await StorageService.createSignedUrl(
+            logoAsset.storage_bucket || 'client-brand-assets',
+            logoAsset.storage_path
           );
         }
-      } catch (dbErr) {
-        console.warn('Supabase query failed, using devStore:', dbErr);
-      }
-    }
 
-    // 3. Filter out any remote clients that were explicitly deleted locally
-    const filteredRemote = remoteClients.filter(
-      (rc) => !devStore.isClientDeleted(rc.id) && !devStore.isClientDeleted(rc.slug)
+        return {
+          id: c.id,
+          organization_id: c.organization_id,
+          name: c.name,
+          slug: c.slug,
+          niche: c.niche || null,
+          instagram_handle: c.instagram_handle || null,
+          website: c.website || null,
+          status: c.status || 'active',
+          brand_status: c.brand_status || 'ready',
+          visual_memory_status: c.visual_memory_status || (piecesCount > 0 ? 'awaiting_analysis' : 'awaiting_references'),
+          dna: c.dna || null,
+          manual_guidelines: c.manual_guidelines || null,
+          pieces_count: piecesCount,
+          created_at: c.created_at,
+          updated_at: c.updated_at,
+          brandProfile: profile
+            ? {
+                summary: profile.summary,
+                primaryColors: colorsObj.primary || [],
+                secondaryColors: colorsObj.secondary || [],
+                accentColors: colorsObj.accent || [],
+                backgroundColors: colorsObj.background || [],
+                textColors: colorsObj.text || [],
+                allColors: colorsObj.all || [],
+                customPalette: colorsObj.customPalette || [],
+                primaryFont: (profile.typography as any)?.primaryFont || 'Inter',
+                detectedFonts: (profile.typography as any)?.detectedFonts || ['Inter'],
+              }
+            : null,
+          logoPrimaryUrl: logoSignedUrl,
+        };
+      })
     );
 
-    // 4. Merge: localClients ALWAYS take precedence and are NEVER lost!
-    const merged = [...localClients];
-    for (const rc of filteredRemote) {
-      const exists = merged.some((c) => c.id === rc.id || c.slug === rc.slug);
-      if (!exists) {
-        merged.push(rc);
-      }
-    }
-
-    return NextResponse.json({ clients: merged });
-  } catch (err) {
-    console.error('GET /api/clients error:', err);
-    return NextResponse.json({ clients: devStore.listClients() });
+    return NextResponse.json({ clients: populatedClients });
+  } catch (err: any) {
+    if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
+    if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
+    return NextResponse.json(
+      { error: { message: 'Não foi possível conectar ao Studio FA. Tente novamente.' } },
+      { status: 503 }
+    );
   }
 }
 
 export async function POST(req: Request) {
   try {
-    const supabase = getSupabaseServerClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
     const body = await req.json();
     let {
-      organizationId,
       name,
       slug,
-      legalName,
       niche,
+      instagram_handle,
       instagramHandle,
       website,
       city,
       state,
       notes,
-      summary,
+      manual_guidelines,
+      manualGuidelines,
+      contentGuidelines,
       primaryColors,
+      secondaryColors,
       accentColors,
-      textColors,
-      fontFamily,
       customColors,
+      primaryFont,
+      secondaryFont,
+      detectedFonts,
+      brandVoice,
+      visualStyle,
       primaryLogo,
       secondaryLogo,
       monochromeLogo,
-      fontFiles,
+      initialPieces, // array opcional de até 30 peças
     } = body;
 
     if (!name || typeof name !== 'string' || name.trim().length < 2) {
@@ -128,7 +210,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // Auto-generate or sanitize slug
+    // Normalização de Instagram
+    const normalizedInstagram = normalizeInstagramHandle(instagram_handle || instagramHandle);
+
+    // Normalização de manual guidelines
+    const manualRules = (manual_guidelines || manualGuidelines || contentGuidelines || '').trim();
+
+    // Auto-sanitização do slug
     if (!slug || typeof slug !== 'string' || slug.trim().length === 0) {
       slug = name
         .toLowerCase()
@@ -149,7 +237,7 @@ export async function POST(req: Request) {
       slug = `cliente-${Date.now()}`;
     }
 
-    // Process custom color palette
+    // Processamento de paleta de cores
     const hasCustomColors = Array.isArray(customColors) && customColors.length > 0;
     const colorsList: string[] = hasCustomColors
       ? customColors.map((c: any) => (typeof c === 'string' ? c : c.color))
@@ -163,6 +251,7 @@ export async function POST(req: Request) {
           })
           .map((c: any) => c.color)
       : primaryColors;
+
     const primaryFinal: string[] =
       computedPrimary && computedPrimary.length > 0
         ? computedPrimary
@@ -178,283 +267,279 @@ export async function POST(req: Request) {
           })
           .map((c: any) => c.color)
       : accentColors;
+
     const accentFinal: string[] =
       computedAccent && computedAccent.length > 0
         ? computedAccent
-        : colorsList[1]
+        : colorsList.length > 1
         ? [colorsList[1]]
         : ['#CEF52A'];
 
-    const computedText = hasCustomColors
-      ? customColors
-          .filter((c: any) => {
-            const l = (c.label || '').toLowerCase();
-            return l.includes('texto') || l.includes('fonte');
-          })
-          .map((c: any) => c.color)
-      : textColors;
-    const textFinal: string[] =
-      computedText && computedText.length > 0
-        ? computedText
-        : colorsList[2]
+    const secondaryFinal: string[] =
+      secondaryColors && secondaryColors.length > 0
+        ? secondaryColors
+        : colorsList.length > 2
         ? [colorsList[2]]
-        : ['#FFFFFF'];
+        : ['#1F2937'];
 
-    // Process uploaded fonts
-    const uploadedFontNames: string[] = Array.isArray(fontFiles)
-      ? fontFiles
-          .map((f: any) => f.fontName || f.filename?.replace(/\.[^/.]+$/, '') || 'Custom Font')
-          .filter(Boolean)
-      : [];
-    const allDetectedFonts = Array.from(
-      new Set([...uploadedFontNames, fontFamily || 'Inter, sans-serif'])
-    ).filter(Boolean);
-    const primaryFontFinal = uploadedFontNames[0] || fontFamily || 'Inter, sans-serif';
-
-    const hasVisualMemory = Boolean(
-      summary ||
-        hasCustomColors ||
-        (primaryColors && primaryColors.length > 0) ||
-        fontFamily ||
-        uploadedFontNames.length > 0 ||
-        primaryLogo
+    const allColorsCombined = Array.from(
+      new Set([...primaryFinal, ...secondaryFinal, ...accentFinal, ...colorsList])
     );
-    const initialBrandStatus: 'ready' | 'empty' = hasVisualMemory ? 'ready' : 'empty';
 
-    // Format instagram handle
-    let formattedInsta: string | undefined = undefined;
-    if (instagramHandle && typeof instagramHandle === 'string') {
-      const clean = instagramHandle.trim().replace(/^@+/, '');
-      if (clean) formattedInsta = `@${clean}`;
+    // Validação de peças iniciais opcionais
+    const hasInitialPieces = Array.isArray(initialPieces) && initialPieces.length > 0;
+    const piecesToCreate = hasInitialPieces ? initialPieces.slice(0, 30) : [];
+    const initialVisualStatus = piecesToCreate.length > 0 ? 'awaiting_analysis' : 'awaiting_references';
+
+    // 1. Modo DevStore explícito
+    if (isDevStoreAllowed()) {
+      const orgId = devStore.getOrganizationId();
+      const devCreated = devStore.addClient(
+        {
+          organization_id: orgId,
+          name: name.trim(),
+          slug,
+          niche: niche || null,
+          instagram_handle: normalizedInstagram,
+          website: website || null,
+          city: city || null,
+          state: state || null,
+          country: 'Brasil',
+          notes: notes || null,
+          status: 'active',
+          brand_status: 'ready',
+        },
+        {
+          organization_id: orgId,
+          version: 1,
+          status: 'approved',
+          source: 'manual',
+          summary: `Identidade da marca ${name.trim()}. Nicho: ${niche || 'Geral'}.`,
+          colors: {
+            primary: primaryFinal,
+            secondary: secondaryFinal,
+            accent: accentFinal,
+            all: allColorsCombined,
+            customPalette: hasCustomColors ? customColors : undefined,
+            text: ['#FFFFFF', '#000000'],
+          },
+          typography: {
+            detectedFonts: Array.from(new Set([primaryFont || 'Inter', ...(detectedFonts || [])])),
+            primaryFont: primaryFont || 'Inter',
+          },
+        }
+      );
+
+      return NextResponse.json({ client: devStore.getClientById(devCreated.id) || devCreated });
     }
 
-    const effectiveOrgId = organizationId || devStore.getOrganizationId();
+    // 2. Supabase como fonte oficial
+    const supabase = getSupabaseServerClient();
+    const session = await requireSessionContext(supabase);
 
-    // 1. Always persist to devStore so client is immediately live in the UI
-    const devCreated = devStore.addClient(
-      {
-        organization_id: effectiveOrgId,
-        name: name.trim(),
-        slug,
-        legal_name: legalName?.trim() || null,
-        niche: niche?.trim() || null,
-        instagram_handle: formattedInsta || null,
-        website: website?.trim() || null,
-        city: city?.trim() || null,
-        state: state?.trim() || null,
-        country: 'BR',
-        notes: notes?.trim() || null,
-        status: 'active',
-        brand_status: initialBrandStatus,
+    // Viewer é bloqueado de criar clientes
+    if (session.role === 'viewer') {
+      return NextResponse.json(
+        { error: { message: 'Visualizadores não possuem permissão para criar novos clientes.' } },
+        { status: 403 }
+      );
+    }
+
+    const orgId = session.organizationId;
+
+    // Monta payload de inserção de cliente
+    const clientInsertPayload: any = {
+      organization_id: orgId,
+      name: name.trim(),
+      slug,
+      niche: niche || null,
+      instagram_handle: normalizedInstagram,
+      website: website || null,
+      city: city || null,
+      state: state || null,
+      country: 'Brasil',
+      notes: notes || null,
+      status: 'active',
+      brand_status: piecesToCreate.length > 0 ? 'collecting' : 'ready',
+      visual_memory_status: initialVisualStatus,
+      manual_guidelines: manualRules || null,
+      dna: {},
+      created_by: session.userId,
+    };
+
+    let newClient: any = null;
+
+    try {
+      const { data, error: clientErr } = await (supabase as any)
+        .from('clients')
+        .insert(clientInsertPayload)
+        .select('*')
+        .single();
+
+      if (clientErr) throw clientErr;
+      newClient = data;
+    } catch (insertErr: any) {
+      // Fallback gracioso caso as colunas novas da migration 13 ainda estejam pendentes de execução manual no SQL Editor
+      if (insertErr?.code === '42703' || insertErr?.message?.includes('column')) {
+        console.warn('[POST /api/clients] Detectada coluna pendente no schema remoto, aplicando inserção retrocompatível...');
+        delete clientInsertPayload.dna;
+        delete clientInsertPayload.manual_guidelines;
+        delete clientInsertPayload.visual_memory_status;
+
+        const { data: retryData, error: retryErr } = await (supabase as any)
+          .from('clients')
+          .insert(clientInsertPayload)
+          .select('*')
+          .single();
+
+        if (retryErr || !retryData) {
+          throw new Error(retryErr?.message || 'Falha ao salvar cliente no banco de dados.');
+        }
+        newClient = retryData;
+      } else {
+        throw insertErr;
+      }
+    }
+
+    // Se o criador for Designer, cria atribuição imediata
+    if (session.role === 'designer') {
+      await (supabase as any).from('client_assignments').insert({
+        organization_id: orgId,
+        client_id: newClient.id,
+        user_id: session.userId,
+        assigned_by: session.userId,
+      });
+    }
+
+    // Cria Brand Profile inicial
+    await (supabase as any).from('brand_profiles').insert({
+      organization_id: orgId,
+      client_id: newClient.id,
+      version: 1,
+      status: 'approved',
+      source: 'manual',
+      summary: `Identidade da marca ${newClient.name}. Nicho: ${niche || 'Geral'}.`,
+      colors: {
+        primary: primaryFinal,
+        secondary: secondaryFinal,
+        accent: accentFinal,
+        all: allColorsCombined,
+        customPalette: hasCustomColors ? customColors : [],
+        text: ['#FFFFFF', '#000000'],
       },
-      hasVisualMemory
-        ? {
-            organization_id: effectiveOrgId,
-            version: 1,
-            status: 'approved',
-            source: 'manual',
-            summary:
-              summary?.trim() ||
-              `Identidade visual da marca ${name.trim()}. Estilo moderno e consistente.`,
-            colors: {
-              primary: primaryFinal,
-              secondary: ['#22262B'],
-              accent: accentFinal,
-              background: ['#0B0F17', '#F6F7F8'],
-              text: textFinal,
-              all: colorsList.length > 0 ? colorsList : undefined,
-              customPalette: hasCustomColors ? customColors : undefined,
-            },
-            typography: {
-              detectedFonts: allDetectedFonts,
-              primaryFont: primaryFontFinal,
-            },
-          }
-        : undefined
-    );
+      typography: {
+        detectedFonts: Array.from(new Set([primaryFont || 'Inter', ...(detectedFonts || [])])),
+        primaryFont: primaryFont || 'Inter',
+      },
+      graphical_elements: visualStyle ? { style: visualStyle } : {},
+    });
 
-    // Save uploaded logos & font assets into devStore
-    if (primaryLogo && primaryLogo.dataUrl) {
-      devStore.addAsset({
-        organization_id: effectiveOrgId,
-        client_id: devCreated.id,
-        asset_type: 'logo_primary',
-        label: 'Logo Principal',
-        storage_path: primaryLogo.dataUrl,
-        original_filename: primaryLogo.filename || 'logo-principal.png',
-        mime_type: primaryLogo.mimeType || 'image/png',
-        file_size_bytes: primaryLogo.size || 0,
-      });
-    }
+    // Processamento e Upload Seguro de Logos no Supabase Storage (NUNCA Base64 no banco)
+    let logoSignedUrl: string | null = null;
+    const logosToProcess = [
+      { logo: primaryLogo, type: 'logo_primary', label: 'Logo Principal' },
+      { logo: secondaryLogo, type: 'logo_secondary', label: 'Logo Secundário' },
+      { logo: monochromeLogo, type: 'logo_monochrome', label: 'Logo Monocromático' },
+    ];
 
-    if (secondaryLogo && secondaryLogo.dataUrl) {
-      devStore.addAsset({
-        organization_id: effectiveOrgId,
-        client_id: devCreated.id,
-        asset_type: 'logo_secondary',
-        label: 'Logo Secundário',
-        storage_path: secondaryLogo.dataUrl,
-        original_filename: secondaryLogo.filename || 'logo-secundario.png',
-        mime_type: secondaryLogo.mimeType || 'image/png',
-        file_size_bytes: secondaryLogo.size || 0,
-      });
-    }
-
-    if (monochromeLogo && monochromeLogo.dataUrl) {
-      devStore.addAsset({
-        organization_id: effectiveOrgId,
-        client_id: devCreated.id,
-        asset_type: 'logo_monochrome',
-        label: 'Logo Monocromático',
-        storage_path: monochromeLogo.dataUrl,
-        original_filename: monochromeLogo.filename || 'logo-monocromatico.png',
-        mime_type: monochromeLogo.mimeType || 'image/png',
-        file_size_bytes: monochromeLogo.size || 0,
-      });
-    }
-
-    if (Array.isArray(fontFiles)) {
-      for (const font of fontFiles) {
-        if (font && font.dataUrl) {
-          devStore.addAsset({
-            organization_id: effectiveOrgId,
-            client_id: devCreated.id,
-            asset_type: 'font',
-            label: font.fontName || font.filename,
-            storage_path: font.dataUrl,
-            original_filename: font.filename || 'fonte.ttf',
-            mime_type: font.mimeType || 'font/ttf',
-            file_size_bytes: font.size || 0,
+    for (const item of logosToProcess) {
+      if (item.logo && (item.logo.dataUrl || item.logo.base64)) {
+        const rawContent = item.logo.dataUrl || item.logo.base64;
+        try {
+          const uploadResult = await StorageService.uploadBase64({
+            bucket: 'client-brand-assets',
+            organizationId: orgId,
+            clientId: newClient.id,
+            folder: 'logos',
+            originalFilename: item.logo.filename || `${item.type}.png`,
+            base64Data: rawContent,
+            mimeType: item.logo.mimeType,
           });
+
+          await (supabase as any).from('client_assets').insert({
+            organization_id: orgId,
+            client_id: newClient.id,
+            asset_type: item.type,
+            label: item.label,
+            storage_bucket: uploadResult.storageBucket,
+            storage_path: uploadResult.storagePath,
+            original_filename: item.logo.filename || `${item.type}.png`,
+            mime_type: uploadResult.mimeType,
+            file_size_bytes: uploadResult.fileSizeBytes,
+            uploaded_by: session.userId,
+          });
+
+          if (item.type === 'logo_primary') {
+            logoSignedUrl = await StorageService.createSignedUrl('client-brand-assets', uploadResult.storagePath);
+          }
+        } catch (uploadErr: any) {
+          console.error(`[POST /api/clients] Erro ao fazer upload do logo ${item.type}:`, uploadErr);
         }
       }
     }
 
-    const fullDevClient = devStore.getClientById(devCreated.id) || devCreated;
+    // Processamento e Upload Seguro de Peças de Referência Iniciais (Opcionais)
+    let savedPiecesCount = 0;
+    if (piecesToCreate.length > 0) {
+      for (const piece of piecesToCreate) {
+        if (!piece.base64 && !piece.dataUrl) continue;
+        const rawData = piece.base64 || piece.dataUrl;
 
-    // 2. Also attempt Supabase insert if available
-    try {
-      let creatorProfileId: string | null = null;
-      if (user?.id) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('id', user.id)
-          .maybeSingle();
-        if (profile) creatorProfileId = (profile as any).id;
+        try {
+          const uploadResult = await StorageService.uploadBase64({
+            bucket: 'client-pieces',
+            organizationId: orgId,
+            clientId: newClient.id,
+            folder: 'pieces',
+            originalFilename: piece.filename || 'referencia.png',
+            base64Data: rawData,
+            mimeType: piece.mimeType,
+          });
+
+          const detected = VisualAnalyzerService.detectFormat(piece.width, piece.height, piece.filename);
+          const formatType = piece.formatType || detected.formatType;
+          const pieceType = piece.pieceType || 'own_brand';
+
+          // Tenta salvar na tabela client_pieces
+          try {
+            await (supabase as any).from('client_pieces').insert({
+              organization_id: orgId,
+              client_id: newClient.id,
+              title: piece.title || null,
+              original_filename: piece.filename || 'referencia.png',
+              storage_bucket: uploadResult.storageBucket,
+              storage_path: uploadResult.storagePath,
+              file_size_bytes: uploadResult.fileSizeBytes,
+              mime_type: uploadResult.mimeType,
+              width: piece.width || null,
+              height: piece.height || null,
+              aspect_ratio: piece.aspectRatio || detected.aspectRatio,
+              format_type: formatType,
+              piece_type: pieceType,
+              analysis_status: 'pending',
+              created_by: session.userId,
+            });
+            savedPiecesCount++;
+          } catch (pieceTableErr: any) {
+            console.warn('[POST /api/clients] Erro ao salvar em client_pieces:', pieceTableErr.message);
+          }
+        } catch (pieceErr: any) {
+          console.error('[POST /api/clients] Erro no upload da peça:', pieceErr);
+        }
       }
-
-      const clientService = new ClientService(supabase);
-      const client = await clientService.create(
-        {
-          organization_id: effectiveOrgId,
-          name: name.trim(),
-          slug,
-          legal_name: legalName?.trim() || undefined,
-          niche: niche?.trim() || undefined,
-          instagram_handle: formattedInsta,
-          website: website?.trim() || '',
-          city: city?.trim() || undefined,
-          state: state?.trim() || undefined,
-          country: 'BR',
-          notes: notes?.trim() || undefined,
-          status: 'active',
-          brand_status: initialBrandStatus,
-        },
-        creatorProfileId
-      );
-
-      if (hasVisualMemory) {
-        await (supabase.from('brand_profiles') as any).insert({
-          organization_id: effectiveOrgId,
-          client_id: client.id,
-          version: 1,
-          status: 'approved',
-          source: 'manual',
-          summary:
-            summary?.trim() ||
-            `Identidade visual da marca ${client.name}. Estilo moderno e consistente.`,
-          colors: {
-            primary: primaryFinal,
-            secondary: ['#22262B'],
-            accent: accentFinal,
-            background: ['#0B0F17', '#F6F7F8'],
-            text: textFinal,
-          },
-          typography: {
-            detectedFonts: allDetectedFonts,
-            primaryFont: primaryFontFinal,
-            weights: ['normal', 'bold'],
-            hierarchy: {
-              headline: { minSize: 32, maxSize: 72 },
-              body: { minSize: 14, maxSize: 24 },
-            },
-          },
-          composition: { alignment: 'left', balance: 'asymmetrical', density: 'minimal' },
-          photography: { style: 'editorial', lighting: 'natural' },
-          logo_usage: { preferredPlacement: 'top-left', safeZone: 20 },
-          graphical_elements: { badges: true, shapes: ['rounded_rect'] },
-          visual_style: { aesthetic: niche || 'contemporâneo', mood: 'profissional' },
-          content_style: { tone: 'direto', personality: 'moderno' },
-          spacing_rules: { margin: 40, padding: 24 },
-          dos: ['Manter tipografia legível e contraste alto', 'Preservar as cores da marca'],
-          donts: ['Não achatar texto na imagem', 'Não distorcer logotipo'],
-          raw_analysis: {},
-          created_by: creatorProfileId,
-          approved_by: creatorProfileId,
-          approved_at: new Date().toISOString(),
-        });
-      }
-
-      return NextResponse.json({ client: fullDevClient }, { status: 201 });
-    } catch (sbErr) {
-      console.warn('Supabase insert failed, returning devCreated client:', sbErr);
-      return NextResponse.json({ client: fullDevClient }, { status: 201 });
     }
-  } catch (err) {
-    console.error('POST /api/clients error:', err);
+
+    return NextResponse.json({
+      client: {
+        ...newClient,
+        visual_memory_status: initialVisualStatus,
+        initialPiecesCount: savedPiecesCount,
+        logoPrimaryUrl: logoSignedUrl,
+      },
+    });
+  } catch (err: any) {
+    if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
+    if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
     return NextResponse.json(formatError(err), { status: 500 });
   }
 }
-
-export async function DELETE(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    let clientId = searchParams.get('id');
-
-    if (!clientId) {
-      try {
-        const body = await req.json();
-        clientId = body.id || body.clientId;
-      } catch {
-        // Ignored
-      }
-    }
-
-    if (!clientId) {
-      return NextResponse.json(
-        { error: { message: 'ID do cliente é obrigatório para exclusão.' } },
-        { status: 400 }
-      );
-    }
-
-    // 1. Remove from devStore
-    devStore.deleteClient(clientId);
-
-    // 2. Also attempt Supabase delete if available
-    try {
-      const supabase = getSupabaseServerClient();
-      const orgId = devStore.getOrganizationId();
-      const clientService = new ClientService(supabase);
-      await clientService.delete(clientId, orgId);
-    } catch (sbErr) {
-      console.warn('Supabase delete client failed:', sbErr);
-    }
-
-    return NextResponse.json({ success: true, message: 'Cliente excluído com sucesso.' });
-  } catch (err) {
-    console.error('DELETE /api/clients error:', err);
-    return NextResponse.json(formatError(err), { status: 500 });
-  }
-}
-

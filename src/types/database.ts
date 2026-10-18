@@ -207,6 +207,9 @@ export interface Database {
           notes: string | null;
           status: ClientStatus;
           brand_status: BrandStatus;
+          dna: Json | null;
+          manual_guidelines: string | null;
+          visual_memory_status: string | null;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -227,6 +230,9 @@ export interface Database {
           notes?: string | null;
           status?: ClientStatus;
           brand_status?: BrandStatus;
+          dna?: Json | null;
+          manual_guidelines?: string | null;
+          visual_memory_status?: string | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -247,10 +253,94 @@ export interface Database {
           notes?: string | null;
           status?: ClientStatus;
           brand_status?: BrandStatus;
+          dna?: Json | null;
+          manual_guidelines?: string | null;
+          visual_memory_status?: string | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
           archived_at?: string | null;
+        };
+        Relationships: [];
+      };
+      client_pieces: {
+        Row: {
+          id: string;
+          organization_id: string;
+          client_id: string;
+          title: string | null;
+          original_filename: string;
+          storage_bucket: string;
+          storage_path: string;
+          file_size_bytes: number;
+          mime_type: string;
+          width: number | null;
+          height: number | null;
+          aspect_ratio: number | null;
+          format_type: 'feed' | 'story' | 'square' | 'cover' | 'custom';
+          piece_type: 'own_brand' | 'external_reference' | 'promotional';
+          analysis_status: 'pending' | 'queued' | 'analyzing' | 'completed' | 'failed';
+          analysis_json: Json | null;
+          analysis_model: string | null;
+          analysis_prompt_version: string | null;
+          analysis_error: string | null;
+          analyzed_at: string | null;
+          quality_score: number | null;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          client_id: string;
+          title?: string | null;
+          original_filename: string;
+          storage_bucket?: string;
+          storage_path: string;
+          file_size_bytes?: number;
+          mime_type: string;
+          width?: number | null;
+          height?: number | null;
+          aspect_ratio?: number | null;
+          format_type?: 'feed' | 'story' | 'square' | 'cover' | 'custom';
+          piece_type?: 'own_brand' | 'external_reference' | 'promotional';
+          analysis_status?: 'pending' | 'queued' | 'analyzing' | 'completed' | 'failed';
+          analysis_json?: Json | null;
+          analysis_model?: string | null;
+          analysis_prompt_version?: string | null;
+          analysis_error?: string | null;
+          analyzed_at?: string | null;
+          quality_score?: number | null;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          client_id?: string;
+          title?: string | null;
+          original_filename?: string;
+          storage_bucket?: string;
+          storage_path?: string;
+          file_size_bytes?: number;
+          mime_type?: string;
+          width?: number | null;
+          height?: number | null;
+          aspect_ratio?: number | null;
+          format_type?: 'feed' | 'story' | 'square' | 'cover' | 'custom';
+          piece_type?: 'own_brand' | 'external_reference' | 'promotional';
+          analysis_status?: 'pending' | 'queued' | 'analyzing' | 'completed' | 'failed';
+          analysis_json?: Json | null;
+          analysis_model?: string | null;
+          analysis_prompt_version?: string | null;
+          analysis_error?: string | null;
+          analyzed_at?: string | null;
+          quality_score?: number | null;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
         };
         Relationships: [];
       };
@@ -317,6 +407,93 @@ export interface Database {
           created_at?: string;
           updated_at?: string;
           archived_at?: string | null;
+        };
+        Relationships: [];
+      };
+      client_assignments: {
+        Row: {
+          id: string;
+          organization_id: string;
+          client_id: string;
+          user_id: string;
+          assigned_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          client_id: string;
+          user_id: string;
+          assigned_by?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          client_id?: string;
+          user_id?: string;
+          assigned_by?: string | null;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      integration_credentials: {
+        Row: {
+          id: string;
+          organization_id: string;
+          provider: string;
+          encrypted_secret: string;
+          secret_last_four: string;
+          status: 'connected' | 'unconfigured' | 'error';
+          configured_by: string | null;
+          created_at: string;
+          updated_at: string;
+          last_tested_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          provider: string;
+          encrypted_secret: string;
+          secret_last_four: string;
+          status?: 'connected' | 'unconfigured' | 'error';
+          configured_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+          last_tested_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          provider?: string;
+          encrypted_secret?: string;
+          secret_last_four?: string;
+          status?: 'connected' | 'unconfigured' | 'error';
+          configured_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+          last_tested_at?: string | null;
+        };
+        Relationships: [];
+      };
+      integration_settings: {
+        Row: {
+          organization_id: string;
+          provider: string;
+          settings: Json;
+          updated_at: string;
+        };
+        Insert: {
+          organization_id: string;
+          provider: string;
+          settings?: Json;
+          updated_at?: string;
+        };
+        Update: {
+          organization_id?: string;
+          provider?: string;
+          settings?: Json;
+          updated_at?: string;
         };
         Relationships: [];
       };

@@ -70,7 +70,11 @@ export class ProjectService {
     };
   }
 
-  async create(input: CreateProjectInput, userId: string): Promise<ProjectRow> {
+  async create(
+    input: CreateProjectInput,
+    userId: string,
+    options?: { autoCreateSlide0?: boolean }
+  ): Promise<ProjectRow> {
     const validated = CreateProjectSchema.parse(input);
 
     const { data, error } = await this.supabase
@@ -98,14 +102,16 @@ export class ProjectService {
       throw new ValidationError(`Erro ao criar projeto: ${error?.message}`);
     }
 
-    // Initialize slide 0 for single_post or carousel
-    await this.supabase.from('project_slides').insert({
-      organization_id: validated.organization_id,
-      project_id: data.id,
-      slide_index: 0,
-      status: 'draft',
-      metadata: {},
-    });
+    // Inicializa slide 0 apenas se explicitamente solicitado (o chamador normalmente gerencia os slides via addSlide)
+    if (options?.autoCreateSlide0) {
+      await this.supabase.from('project_slides').insert({
+        organization_id: validated.organization_id,
+        project_id: data.id,
+        slide_index: 0,
+        status: 'draft',
+        metadata: {},
+      });
+    }
 
     Logger.info({
       operation: 'createProject',
@@ -121,22 +127,26 @@ export class ProjectService {
   async addSlide(input: CreateSlideInput): Promise<ProjectSlideRow> {
     const validated = CreateSlideSchema.parse(input);
 
+    // Upsert para garantir idempotência e evitar erros de violação de unique constraint (project_id, slide_index)
     const { data, error } = await this.supabase
       .from('project_slides')
-      .insert({
-        organization_id: validated.organization_id,
-        project_id: validated.project_id,
-        slide_index: validated.slide_index,
-        slide_type: validated.slide_type ?? null,
-        title: validated.title ?? null,
-        subtitle: validated.subtitle ?? null,
-        body: validated.body ?? null,
-        cta: validated.cta ?? null,
-        instructions: validated.instructions ?? null,
-        base_asset_id: validated.base_asset_id ?? null,
-        status: validated.status,
-        metadata: validated.metadata,
-      })
+      .upsert(
+        {
+          organization_id: validated.organization_id,
+          project_id: validated.project_id,
+          slide_index: validated.slide_index,
+          slide_type: validated.slide_type ?? null,
+          title: validated.title ?? null,
+          subtitle: validated.subtitle ?? null,
+          body: validated.body ?? null,
+          cta: validated.cta ?? null,
+          instructions: validated.instructions ?? null,
+          base_asset_id: validated.base_asset_id ?? null,
+          status: validated.status,
+          metadata: validated.metadata,
+        },
+        { onConflict: 'project_id,slide_index' }
+      )
       .select()
       .single();
 

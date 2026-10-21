@@ -25,25 +25,25 @@ export const CreateProjectSchema = z.object({
   format: z
     .enum(['instagram_feed_4_5', 'instagram_square', 'instagram_story', 'custom'])
     .default('instagram_feed_4_5'),
-  width: z.number().int().positive().optional(),
-  height: z.number().int().positive().optional(),
-  generation_mode: z.string().optional(),
-  brief: z.string().optional(),
+  width: z.number().int().positive().nullable().optional(),
+  height: z.number().int().positive().nullable().optional(),
+  generation_mode: z.string().nullable().optional(),
+  brief: z.string().nullable().optional(),
   metadata: z.record(z.unknown()).default({}),
-  assigned_to: z.string().uuid().optional(),
+  assigned_to: z.string().uuid().nullable().optional(),
 });
 
 export const CreateSlideSchema = z.object({
   organization_id: z.string().uuid(),
   project_id: z.string().uuid(),
   slide_index: z.number().int().nonnegative(),
-  slide_type: z.string().optional(),
-  title: z.string().optional(),
-  subtitle: z.string().optional(),
-  body: z.string().optional(),
-  cta: z.string().optional(),
-  instructions: z.string().optional(),
-  base_asset_id: z.string().uuid().optional(),
+  slide_type: z.string().nullable().optional(),
+  title: z.string().nullable().optional(),
+  subtitle: z.string().nullable().optional(),
+  body: z.string().nullable().optional(),
+  cta: z.string().nullable().optional(),
+  instructions: z.string().nullable().optional(),
+  base_asset_id: z.string().uuid().nullable().optional(),
   status: z
     .enum(['draft', 'ready', 'generating', 'review', 'approved', 'failed'])
     .default('draft'),

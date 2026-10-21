@@ -36,3 +36,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # supabase cli temporary files
 supabase/.temp
+
+# scratch & temporary files
+scratch/

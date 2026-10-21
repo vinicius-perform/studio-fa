@@ -1,7 +1,7 @@
 // src/app/clients/[id]/page.tsx
 'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AppSidebar } from '@/components/layout/AppSidebar';
@@ -31,8 +31,11 @@ import {
   Sliders,
   ChevronRight,
   Loader2,
+  FolderKanban,
+  Bot,
+  Download,
 } from 'lucide-react';
-import { BrandDNA } from '@/types/domain/dna';
+import { BrandDNA, normalizeBrandDNAForDisplay, DisplayBrandDNA } from '@/types/domain/dna';
 import { ClientPieceItem, PieceAnalysis } from '@/types/domain/piece';
 
 export default function ClientProfilePage() {
@@ -42,9 +45,28 @@ export default function ClientProfilePage() {
 
   const [client, setClient] = useState<any>(null);
   const [pieces, setPieces] = useState<ClientPieceItem[]>([]);
-  const [dna, setDna] = useState<BrandDNA | null>(null);
+  const [dna, setDna] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'dna' | 'pieces' | 'guidelines'>('dna');
+  const [activeTab, setActiveTab] = useState<'dna' | 'pieces' | 'logos' | 'guidelines'>('dna');
+
+  // Estados de gerenciamento de logotipos da marca
+  const [uploadingLogoType, setUploadingLogoType] = useState<string | null>(null);
+  const [logoActionError, setLogoActionError] = useState<string | null>(null);
+  const primaryLogoInputRef = useRef<HTMLInputElement>(null);
+  const secondaryLogoInputRef = useRef<HTMLInputElement>(null);
+  const monochromeLogoInputRef = useRef<HTMLInputElement>(null);
+
+  // Normalização segura para visualização sem assumptions de propriedades obrigatórias
+  const displayDna: DisplayBrandDNA | null = useMemo(() => normalizeBrandDNAForDisplay(dna), [dna]);
+
+  // Resolução do status da memória visual com base nos dados do cliente e peças
+  const visualStatus: string =
+    client?.visual_memory_status ||
+    (pieces.length > 0 || (client?.pieces_count && client.pieces_count > 0)
+      ? displayDna
+        ? 'ready'
+        : 'awaiting_analysis'
+      : 'awaiting_references');
 
   // Estados de análise e reanálise
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -91,7 +113,13 @@ export default function ClientProfilePage() {
 
       const clientData = await resClient.json();
       setClient(clientData.client);
-      setDna(clientData.client?.dna || null);
+      const rawDna = clientData.client?.dna;
+      const hasDna =
+        rawDna &&
+        typeof rawDna === 'object' &&
+        Object.keys(rawDna).length > 0 &&
+        Boolean(rawDna.summary || rawDna.colorSystem || rawDna.typography || rawDna.version);
+      setDna(hasDna ? rawDna : null);
       setManualGuidelinesText(clientData.client?.manual_guidelines || '');
 
       if (resPieces.ok) {
@@ -208,6 +236,72 @@ export default function ClientProfilePage() {
       setErrorMessage(err?.message || 'Erro ao salvar diretrizes.');
     } finally {
       setIsSavingGuidelines(false);
+    }
+  };
+
+  // Upload ou substituição de logotipo da marca
+  const handleLogoUpload = async (assetType: string, file: File) => {
+    try {
+      setUploadingLogoType(assetType);
+      setLogoActionError(null);
+      setErrorMessage(null);
+
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch(`/api/clients/${clientId}/logos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assetType,
+          base64,
+          filename: file.name,
+          mimeType: file.type,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error?.message || 'Falha ao salvar logotipo.');
+      }
+
+      setSuccessMessage(`Logotipo "${data.asset?.label || assetType}" atualizado com sucesso!`);
+      await loadClientData();
+    } catch (err: any) {
+      setLogoActionError(err?.message || 'Erro ao processar logotipo.');
+    } finally {
+      setUploadingLogoType(null);
+    }
+  };
+
+  // Remoção de logotipo
+  const handleLogoDelete = async (assetType: string, label: string) => {
+    if (!confirm(`Deseja realmente remover o "${label}" deste cliente?`)) return;
+
+    try {
+      setUploadingLogoType(assetType);
+      setLogoActionError(null);
+      setErrorMessage(null);
+
+      const res = await fetch(`/api/clients/${clientId}/logos?assetType=${assetType}`, {
+        method: 'DELETE',
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error?.message || 'Falha ao remover logotipo.');
+      }
+
+      setSuccessMessage(`Logotipo removido com sucesso.`);
+      await loadClientData();
+    } catch (err: any) {
+      setLogoActionError(err?.message || 'Erro ao remover logotipo.');
+    } finally {
+      setUploadingLogoType(null);
     }
   };
 
@@ -329,11 +423,20 @@ export default function ClientProfilePage() {
             <span>Peças Aguardando Análise</span>
           </span>
         );
+      case 'needs_refresh':
       case 'needs_review':
         return (
           <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
             <span>Revisão Necessária</span>
+          </span>
+        );
+      case 'error':
+      case 'failed':
+        return (
+          <span className="px-3 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+            <span>Erro na Análise</span>
           </span>
         );
       default:
@@ -388,6 +491,11 @@ export default function ClientProfilePage() {
   const pendingPiecesCount = pieces.filter((p) => p.analysis_status === 'pending').length;
   const failedPiecesCount = pieces.filter((p) => p.analysis_status === 'failed').length;
 
+  const primaryLogo = client?.assets?.find((a: any) => a.asset_type === 'logo_primary') || null;
+  const secondaryLogo = client?.assets?.find((a: any) => a.asset_type === 'logo_secondary') || null;
+  const monochromeLogo = client?.assets?.find((a: any) => a.asset_type === 'logo_monochrome') || null;
+  const logosCount = [primaryLogo, secondaryLogo, monochromeLogo].filter(Boolean).length;
+
   return (
     <div className="flex h-screen w-full bg-[#F6F7F8] font-sans overflow-hidden">
       <AppSidebar />
@@ -410,6 +518,8 @@ export default function ClientProfilePage() {
                   <img
                     src={client.logoPrimaryUrl}
                     alt={client.name}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-contain p-1"
                   />
                 ) : (
@@ -420,7 +530,7 @@ export default function ClientProfilePage() {
               <div>
                 <div className="flex items-center gap-2.5">
                   <h1 className="text-lg font-bold text-gray-900">{client.name}</h1>
-                  {getVisualMemoryBadge(client.visual_memory_status)}
+                  {getVisualMemoryBadge(visualStatus)}
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
                   {client.niche && (
@@ -455,11 +565,20 @@ export default function ClientProfilePage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            {/* Botão Ver Produções do Cliente */}
+            <Link
+              href={`/projects?client=${client.id}`}
+              className="px-3.5 py-2 bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 rounded-xl font-semibold text-xs flex items-center gap-1.5 transition shadow-2xs"
+            >
+              <FolderKanban className="w-4 h-4 text-gray-500" />
+              <span className="hidden sm:inline">Ver Produções</span>
+            </Link>
+
             {/* Botão de Análise com IA */}
             <button
               onClick={() => handleTriggerAnalysis(false)}
-              disabled={isAnalyzing || pieces.length === 0}
+              disabled={isAnalyzing || (pieces.length === 0 && (!client.pieces_count || client.pieces_count === 0))}
               className="px-3.5 py-2 bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-2xs disabled:opacity-50"
               title="Executar análise visual com OpenAI Vision nas peças pendentes"
             >
@@ -467,13 +586,14 @@ export default function ClientProfilePage() {
               <span>{isAnalyzing ? 'Analisando...' : 'Analisar Peças com IA'}</span>
             </button>
 
-            {/* Botão de Nova Produção */}
+            {/* Botão de Criar no Chat (Novo Núcleo Único) */}
             <Link
-              href={`/create?client=${client.id}`}
+              href={`/creative-chat?client=${client.id}`}
               className="px-4 py-2 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-sm"
+              title="Criar com este cliente no Chat Criativo"
             >
-              <span>Criar Arte</span>
-              <ChevronRight className="w-4 h-4" />
+              <Bot className="w-4 h-4 text-[#CEF52A]" />
+              <span>Criar no Chat</span>
             </Link>
           </div>
         </div>
@@ -493,6 +613,18 @@ export default function ClientProfilePage() {
               <span>{errorMessage}</span>
             </div>
             <button onClick={() => setErrorMessage(null)} className="text-red-500 hover:text-red-700">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {logoActionError && (
+          <div className="bg-red-50 border-b border-red-200 px-8 py-3 flex items-center justify-between text-xs text-red-700 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{logoActionError}</span>
+            </div>
+            <button onClick={() => setLogoActionError(null)} className="text-red-500 hover:text-red-700">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -523,9 +655,9 @@ export default function ClientProfilePage() {
             >
               <Sparkles className="w-4 h-4" />
               <span>DNA Visual Consolidado</span>
-              {dna && (
+              {displayDna && (
                 <span className="text-[10px] bg-black text-[#CEF52A] px-1.5 py-0.2 rounded-full font-bold">
-                  v{dna.version || 1}
+                  v{displayDna.version || 1}
                 </span>
               )}
             </button>
@@ -542,6 +674,25 @@ export default function ClientProfilePage() {
               <span>Peças de Referência</span>
               <span className="text-[10px] bg-gray-100 text-gray-700 px-1.5 py-0.2 rounded-full font-bold">
                 {pieces.length}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('logos')}
+              className={`py-3.5 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+                activeTab === 'logos'
+                  ? 'border-black text-black'
+                  : 'border-transparent text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              <Palette className="w-4 h-4" />
+              <span>Logotipos da Marca</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                  logosCount > 0 ? 'bg-black text-[#CEF52A]' : 'bg-gray-100 text-gray-600'
+                }`}
+              >
+                {logosCount}/3
               </span>
             </button>
 
@@ -594,26 +745,195 @@ export default function ClientProfilePage() {
                 </div>
               )}
 
-              {/* Se não houver DNA */}
-              {!dna ? (
-                <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center space-y-4">
+              {/* ESTADO 1: ANALISANDO COM IA */}
+              {isAnalyzing || visualStatus === 'analyzing' ? (
+                <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center space-y-4 shadow-2xs">
+                  <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto">
+                    <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="font-bold text-gray-900 text-base">Analisando Identidade Visual com IA...</h3>
+                    <p className="text-xs text-gray-500 max-w-md mx-auto leading-relaxed">
+                      A Inteligência Artificial está auditando as peças de referência cadastradas para consolidar a paleta de cores, tipografia e diretrizes de arte da marca.
+                    </p>
+                  </div>
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-200 text-blue-700 rounded-full text-xs font-medium">
+                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                    <span>Processamento em lote em andamento</span>
+                  </div>
+                </div>
+              ) : visualStatus === 'error' || visualStatus === 'failed' ? (
+                /* ESTADO 2: ERRO NA ANÁLISE */
+                <div className="bg-white rounded-2xl border border-rose-200 p-12 text-center space-y-4 shadow-2xs">
+                  <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+                    <AlertCircle className="w-6 h-6 text-rose-600" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="font-bold text-gray-900 text-sm">Erro na Análise da Memória Visual</h3>
+                    <p className="text-xs text-gray-500 max-w-md mx-auto">
+                      Ocorreu uma falha ao auditar as peças de referência com a Inteligência Artificial. Verifique as peças na aba ao lado ou tente novamente.
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-center gap-3 pt-2">
+                    <button
+                      onClick={() => handleTriggerAnalysis(true)}
+                      disabled={isAnalyzing}
+                      className="px-4 py-2 bg-black text-[#CEF52A] rounded-xl font-bold text-xs inline-flex items-center gap-2 transition"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
+                      <span>Tentar Novamente</span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('pieces')}
+                      className="px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 rounded-xl font-bold text-xs inline-flex items-center gap-1.5 transition"
+                    >
+                      <ImageIcon className="w-4 h-4 text-gray-500" />
+                      <span>Revisar Peças</span>
+                    </button>
+                  </div>
+                </div>
+              ) : visualStatus === 'awaiting_analysis' ? (
+                /* ESTADO 3: PEÇAS ENVIADAS / AGUARDANDO ANÁLISE */
+                <div className="space-y-6">
+                  <div className="bg-white rounded-2xl border border-gray-200 p-8 shadow-2xs space-y-6">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-gray-100">
+                      <div className="flex items-start gap-4">
+                        <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                          <Clock className="w-6 h-6" />
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2.5">
+                            <h3 className="font-bold text-gray-900 text-base">Peças enviadas com sucesso</h3>
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                              {pieces.length || client.pieces_count || 0} peças cadastradas
+                            </span>
+                          </div>
+                          <p className="text-xs text-indigo-700 font-semibold">
+                            Memória visual aguardando análise
+                          </p>
+                          <p className="text-xs text-gray-500 max-w-xl leading-relaxed">
+                            As referências gráficas da marca foram recebidas e persistidas com segurança. Inicie a auditoria com IA para extrair a paleta cromática, hierarquia tipográfica e consolidar o Brand DNA.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        <button
+                          onClick={() => handleTriggerAnalysis(false)}
+                          disabled={isAnalyzing || (pieces.length === 0 && (!client.pieces_count || client.pieces_count === 0))}
+                          className="px-5 py-2.5 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-sm disabled:opacity-50"
+                        >
+                          <Sparkles className="w-4 h-4 text-[#CEF52A]" />
+                          <span>Analisar peças</span>
+                        </button>
+                        <button
+                          onClick={() => setActiveTab('pieces')}
+                          className="px-4 py-2.5 bg-white hover:bg-gray-50 text-gray-700 border border-gray-300 rounded-xl font-bold text-xs flex items-center gap-1.5 transition"
+                        >
+                          <ImageIcon className="w-4 h-4 text-gray-500" />
+                          <span>Ver Peças</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Galeria de Miniaturas das peças cadastradas */}
+                    {pieces.length > 0 && (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold text-gray-700">Peças Prontas para Análise ({pieces.length})</span>
+                          <button
+                            onClick={() => setActiveTab('pieces')}
+                            className="text-gray-500 hover:text-black font-semibold flex items-center gap-1"
+                          >
+                            <span>Ver todas na galeria</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                          {pieces.slice(0, 6).map((piece) => (
+                            <div
+                              key={piece.id}
+                              onClick={() => { setSelectedPiece(piece); setActiveTab('pieces'); }}
+                              className="aspect-4/5 rounded-xl border border-gray-200 bg-gray-100 overflow-hidden cursor-pointer hover:border-black transition group relative"
+                            >
+                              {piece.signedUrl ? (
+                                <img
+                                  src={piece.signedUrl}
+                                  alt={piece.original_filename}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center text-gray-400">
+                                  <ImageIcon className="w-5 h-5" />
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                          {pieces.length > 6 && (
+                            <button
+                              onClick={() => setActiveTab('pieces')}
+                              className="aspect-4/5 rounded-xl border border-dashed border-gray-300 hover:border-black bg-gray-50 flex flex-col items-center justify-center p-2 text-center transition"
+                            >
+                              <span className="text-xs font-bold text-gray-700">+{pieces.length - 6}</span>
+                              <span className="text-[10px] text-gray-400">mais peças</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : visualStatus === 'awaiting_references' && !displayDna ? (
+                /* ESTADO 4: AGUARDANDO PEÇAS DE REFERÊNCIA */
+                <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center space-y-4 shadow-2xs">
                   <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto">
                     <Clock className="w-6 h-6" />
                   </div>
-                  <h3 className="font-bold text-gray-900 text-sm">DNA Visual Ainda Não Consolidado</h3>
-                  <p className="text-xs text-gray-500 max-w-md mx-auto">
-                    Envie peças de referência gráfica na aba ao lado ou preencha as diretrizes manuais da marca. Em seguida, clique em &quot;Analisar Peças com IA&quot; para consolidar o Brand DNA.
-                  </p>
+                  <div className="space-y-1">
+                    <h3 className="font-bold text-gray-900 text-sm">DNA Visual Ainda Não Consolidado</h3>
+                    <p className="text-xs text-gray-500 max-w-md mx-auto">
+                      Envie peças de referência gráfica na aba de peças ou preencha as diretrizes manuais da marca para alimentar o aprendizado visual da IA.
+                    </p>
+                  </div>
                   <button
-                    onClick={() => setActiveTab('pieces')}
+                    onClick={() => {
+                      setActiveTab('pieces');
+                      setShowUploadModal(true);
+                    }}
                     className="px-4 py-2 bg-black text-[#CEF52A] rounded-xl font-bold text-xs inline-flex items-center gap-2 transition"
                   >
                     <Upload className="w-4 h-4" />
-                    <span>Gerenciar Peças de Referência</span>
+                    <span>Enviar Peças de Referência</span>
                   </button>
                 </div>
-              ) : (
+              ) : displayDna ? (
+                /* ESTADO 5: READY OU NEEDS_REFRESH COM DNA CONSOLIDADO */
                 <div className="space-y-6">
+                  {/* Banner de aviso se needs_refresh ou needs_review */}
+                  {(visualStatus === 'needs_refresh' || visualStatus === 'needs_review') && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="text-xs font-bold text-amber-900">
+                            Atualização de Memória Visual Pendente
+                          </h4>
+                          <p className="text-xs text-amber-800 mt-0.5 leading-relaxed">
+                            Novas peças foram adicionadas ou diretrizes manuais foram alteradas. O Brand DNA abaixo reflete a consolidação anterior.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleTriggerAnalysis(true)}
+                        disabled={isAnalyzing}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition shrink-0"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
+                        <span>Reconsolidar DNA</span>
+                      </button>
+                    </div>
+                  )}
+
                   {/* Resumo Executivo */}
                   <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-3 shadow-2xs">
                     <div className="flex items-center justify-between">
@@ -624,17 +944,17 @@ export default function ClientProfilePage() {
                         </h3>
                       </div>
                       <span className="text-[11px] text-gray-400 font-mono">
-                        Última consolidação: {new Date(dna.lastConsolidatedAt).toLocaleDateString('pt-BR')}
+                        Última consolidação: {displayDna.lastConsolidatedAt ? new Date(displayDna.lastConsolidatedAt).toLocaleDateString('pt-BR') : 'Manual'}
                       </span>
                     </div>
                     <p className="text-sm text-gray-800 leading-relaxed font-medium">
-                      {dna.summary}
+                      {displayDna.summary}
                     </p>
-                    {dna.toneAndVoice && (
+                    {displayDna.toneAndVoice && (
                       <div className="pt-2 border-t border-gray-100 flex items-center gap-2 text-xs">
                         <span className="font-bold text-gray-700">Tom & Voz Visual:</span>
                         <span className="text-gray-600 bg-gray-50 px-2 py-0.5 rounded border border-gray-200">
-                          {dna.toneAndVoice}
+                          {displayDna.toneAndVoice}
                         </span>
                       </div>
                     )}
@@ -651,44 +971,73 @@ export default function ClientProfilePage() {
                         </h3>
                       </div>
 
-                      <div className="grid grid-cols-3 gap-3">
-                        <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
-                          <span className="text-[10px] font-bold text-gray-500 uppercase">Primária</span>
-                          <div
-                            style={{ backgroundColor: dna.colorSystem.primary }}
-                            className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-white drop-shadow-sm"
-                          >
-                            {dna.colorSystem.primary}
-                          </div>
-                        </div>
+                      {displayDna.colorSystem ? (
+                        <>
+                          <div className="grid grid-cols-3 gap-3">
+                            {/* Primária */}
+                            <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
+                              <span className="text-[10px] font-bold text-gray-500 uppercase">Primária</span>
+                              {displayDna.colorSystem.primary ? (
+                                <div
+                                  style={{ backgroundColor: displayDna.colorSystem.primary }}
+                                  className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-white drop-shadow-sm"
+                                >
+                                  {displayDna.colorSystem.primary}
+                                </div>
+                              ) : (
+                                <div className="h-10 rounded-lg border border-dashed border-gray-300 bg-gray-100 flex items-center justify-center text-[10px] text-gray-400 italic">
+                                  Não identificado
+                                </div>
+                              )}
+                            </div>
 
-                        <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
-                          <span className="text-[10px] font-bold text-gray-500 uppercase">Secundária</span>
-                          <div
-                            style={{ backgroundColor: dna.colorSystem.secondary }}
-                            className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-white drop-shadow-sm"
-                          >
-                            {dna.colorSystem.secondary}
-                          </div>
-                        </div>
+                            {/* Secundária */}
+                            <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
+                              <span className="text-[10px] font-bold text-gray-500 uppercase">Secundária</span>
+                              {displayDna.colorSystem.secondary ? (
+                                <div
+                                  style={{ backgroundColor: displayDna.colorSystem.secondary }}
+                                  className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-white drop-shadow-sm"
+                                >
+                                  {displayDna.colorSystem.secondary}
+                                </div>
+                              ) : (
+                                <div className="h-10 rounded-lg border border-dashed border-gray-300 bg-gray-100 flex items-center justify-center text-[10px] text-gray-400 italic">
+                                  Não identificado
+                                </div>
+                              )}
+                            </div>
 
-                        <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
-                          <span className="text-[10px] font-bold text-gray-500 uppercase">Acento / CTA</span>
-                          <div
-                            style={{ backgroundColor: dna.colorSystem.accent }}
-                            className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-black drop-shadow-sm"
-                          >
-                            {dna.colorSystem.accent}
+                            {/* Acento / CTA */}
+                            <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1.5">
+                              <span className="text-[10px] font-bold text-gray-500 uppercase">Acento / CTA</span>
+                              {displayDna.colorSystem.accent ? (
+                                <div
+                                  style={{ backgroundColor: displayDna.colorSystem.accent }}
+                                  className="h-10 rounded-lg border border-black/10 shadow-2xs flex items-center justify-center text-[10px] font-mono font-bold text-black drop-shadow-sm"
+                                >
+                                  {displayDna.colorSystem.accent}
+                                </div>
+                              ) : (
+                                <div className="h-10 rounded-lg border border-dashed border-gray-300 bg-gray-100 flex items-center justify-center text-[10px] text-gray-400 italic">
+                                  Não identificado
+                                </div>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      </div>
 
-                      {dna.colorSystem.distributionRules && (
-                        <div className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1">
-                          <span className="font-bold text-gray-800 block text-[11px]">
-                            Regra de Distribuição Proporcional:
-                          </span>
-                          <p>{dna.colorSystem.distributionRules}</p>
+                          {displayDna.colorSystem.distributionRules && (
+                            <div className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1">
+                              <span className="font-bold text-gray-800 block text-[11px]">
+                                Regra de Distribuição Proporcional:
+                              </span>
+                              <p>{displayDna.colorSystem.distributionRules}</p>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="text-xs text-gray-500 bg-gray-50 p-4 rounded-xl border border-gray-200 italic">
+                          Sistema cromático não identificado ou ainda não consolidado.
                         </div>
                       )}
                     </div>
@@ -702,73 +1051,87 @@ export default function ClientProfilePage() {
                         </h3>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1">
-                          <span className="text-[10px] font-bold text-gray-500 uppercase">
-                            Títulos & Manchetes
-                          </span>
-                          <p className="text-xs font-bold text-gray-900 font-mono truncate">
-                            {dna.typography.titleFont}
-                          </p>
-                        </div>
+                      {displayDna.typography ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1">
+                              <span className="text-[10px] font-bold text-gray-500 uppercase">
+                                Títulos & Manchetes
+                              </span>
+                              <p className="text-xs font-bold text-gray-900 font-mono truncate">
+                                {displayDna.typography.titleFont || 'Não identificado'}
+                              </p>
+                            </div>
 
-                        <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1">
-                          <span className="text-[10px] font-bold text-gray-500 uppercase">
-                            Apoio & Leitura
-                          </span>
-                          <p className="text-xs font-bold text-gray-900 font-mono truncate">
-                            {dna.typography.bodyFont}
-                          </p>
-                        </div>
-                      </div>
+                            <div className="border border-gray-200 rounded-xl p-3 bg-gray-50/50 space-y-1">
+                              <span className="text-[10px] font-bold text-gray-500 uppercase">
+                                Apoio & Leitura
+                              </span>
+                              <p className="text-xs font-bold text-gray-900 font-mono truncate">
+                                {displayDna.typography.bodyFont || 'Não identificado'}
+                              </p>
+                            </div>
+                          </div>
 
-                      {dna.typography.hierarchyGuidelines && (
-                        <div className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1">
-                          <span className="font-bold text-gray-800 block text-[11px]">
-                            Diretrizes de Escala & Contraste:
-                          </span>
-                          <p>{dna.typography.hierarchyGuidelines}</p>
+                          {displayDna.typography.hierarchyGuidelines && (
+                            <div className="text-xs text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1">
+                              <span className="font-bold text-gray-800 block text-[11px]">
+                                Diretrizes de Escala & Contraste:
+                              </span>
+                              <p>{displayDna.typography.hierarchyGuidelines}</p>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="text-xs text-gray-500 bg-gray-50 p-4 rounded-xl border border-gray-200 italic">
+                          Hierarquia tipográfica não identificada ou ainda não consolidada.
                         </div>
                       )}
                     </div>
                   </div>
 
                   {/* Do's & Don'ts */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* Do's */}
-                    <div className="bg-emerald-50/50 rounded-2xl border border-emerald-200 p-6 space-y-3">
-                      <div className="flex items-center gap-2 text-emerald-900 font-bold text-xs uppercase tracking-wider">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                        <span>Obrigatório / Boas Práticas (DO)</span>
-                      </div>
-                      <ul className="space-y-2 text-xs text-emerald-950">
-                        {dna.do.map((item, idx) => (
-                          <li key={idx} className="flex items-start gap-2">
-                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+                  {(displayDna.do.length > 0 || displayDna.dont.length > 0) && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {/* Do's */}
+                      {displayDna.do.length > 0 && (
+                        <div className="bg-emerald-50/50 rounded-2xl border border-emerald-200 p-6 space-y-3">
+                          <div className="flex items-center gap-2 text-emerald-900 font-bold text-xs uppercase tracking-wider">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                            <span>Obrigatório / Boas Práticas (DO)</span>
+                          </div>
+                          <ul className="space-y-2 text-xs text-emerald-950">
+                            {displayDna.do.map((item, idx) => (
+                              <li key={idx} className="flex items-start gap-2">
+                                <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                <span>{item}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
 
-                    {/* Don'ts */}
-                    <div className="bg-rose-50/50 rounded-2xl border border-rose-200 p-6 space-y-3">
-                      <div className="flex items-center gap-2 text-rose-900 font-bold text-xs uppercase tracking-wider">
-                        <AlertTriangle className="w-4 h-4 text-rose-600" />
-                        <span>Proibições Estritas (DON&apos;T)</span>
-                      </div>
-                      <ul className="space-y-2 text-xs text-rose-950">
-                        {dna.dont.map((item, idx) => (
-                          <li key={idx} className="flex items-start gap-2">
-                            <X className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
+                      {/* Don'ts */}
+                      {displayDna.dont.length > 0 && (
+                        <div className="bg-rose-50/50 rounded-2xl border border-rose-200 p-6 space-y-3">
+                          <div className="flex items-center gap-2 text-rose-900 font-bold text-xs uppercase tracking-wider">
+                            <AlertTriangle className="w-4 h-4 text-rose-600" />
+                            <span>Proibições Estritas (DON&apos;T)</span>
+                          </div>
+                          <ul className="space-y-2 text-xs text-rose-950">
+                            {displayDna.dont.map((item, idx) => (
+                              <li key={idx} className="flex items-start gap-2">
+                                <X className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+                                <span>{item}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  )}
                 </div>
-              )}
+              ) : null}
             </div>
           )}
 
@@ -929,7 +1292,360 @@ export default function ClientProfilePage() {
             </div>
           )}
 
-          {/* ================= ABA 3: DIRETRIZES MANUAIS ================= */}
+          {/* ================= ABA 3: LOGOTIPOS DA MARCA ================= */}
+          {activeTab === 'logos' && (
+            <div className="space-y-6">
+              {/* Header da Aba */}
+              <div className="bg-white rounded-2xl border border-gray-200 p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs">
+                <div>
+                  <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                    <Palette className="w-4 h-4 text-black" />
+                    <span>Logotipos Oficiais da Marca</span>
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-1 max-w-2xl leading-relaxed">
+                    Estes arquivos são armazenados no Supabase Storage e ficam disponíveis para uso direto no Creative Chat,
+                    garantindo que toda criação conversacional aplique a assinatura oficial e as proporções exatas da marca.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 self-start md:self-auto bg-gray-50 px-3.5 py-2 rounded-xl border border-gray-200">
+                  <span className="text-xs text-gray-500 font-medium">Logos ativos:</span>
+                  <span className="text-xs font-bold text-black bg-white px-2 py-0.5 rounded-lg border border-gray-200">
+                    {logosCount} de 3
+                  </span>
+                </div>
+              </div>
+
+              {/* Grid dos 3 Slots Oficiais */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* 1. LOGO PRINCIPAL */}
+                <div className="bg-white border border-gray-200 rounded-2xl p-5 flex flex-col justify-between shadow-2xs relative overflow-hidden group">
+                  {uploadingLogoType === 'logo_primary' && (
+                    <div className="absolute inset-0 bg-white/90 backdrop-blur-2xs z-20 flex flex-col items-center justify-center gap-2 text-xs font-bold text-gray-700">
+                      <Loader2 className="w-6 h-6 animate-spin text-black" />
+                      <span>Salvando Logo Principal...</span>
+                    </div>
+                  )}
+
+                  <input
+                    ref={primaryLogoInputRef}
+                    type="file"
+                    accept="image/png,image/svg+xml,image/webp,image/jpeg"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleLogoUpload('logo_primary', file);
+                      e.target.value = '';
+                    }}
+                  />
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                        <h4 className="font-bold text-gray-900 text-xs uppercase tracking-wider">Logo Principal</h4>
+                      </div>
+                      {primaryLogo && (
+                        <span className="text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">
+                          Ativo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 leading-relaxed min-h-[32px]">
+                      Identidade primária usada na maioria dos layouts, posts e cabeçalhos de campanha.
+                    </p>
+
+                    {/* Preview Area */}
+                    {primaryLogo?.signedUrl ? (
+                      <div className="w-full h-44 rounded-xl border border-gray-200 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:12px_12px] bg-gray-50/60 p-4 flex items-center justify-center relative group/img overflow-hidden">
+                        <img
+                          src={primaryLogo.signedUrl}
+                          alt="Logo Principal"
+                          className="max-h-full max-w-full object-contain filter drop-shadow-2xs transition group-hover/img:scale-105"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        onClick={() => primaryLogoInputRef.current?.click()}
+                        className="w-full h-44 border-2 border-dashed border-gray-300 hover:border-black rounded-xl flex flex-col items-center justify-center p-4 cursor-pointer bg-gray-50/40 hover:bg-gray-50 transition text-center space-y-2"
+                      >
+                        <div className="w-9 h-9 rounded-xl bg-white border border-gray-200 flex items-center justify-center text-gray-400 shadow-2xs">
+                          <Upload className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-gray-800 block">Enviar Logo Principal</span>
+                          <span className="text-[10px] text-gray-400">PNG transparente, SVG ou WEBP</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {primaryLogo && (
+                      <div className="text-[11px] text-gray-500 flex items-center justify-between px-1">
+                        <span className="truncate max-w-[170px]" title={primaryLogo.original_filename}>
+                          {primaryLogo.original_filename || 'logo_primary.png'}
+                        </span>
+                        {primaryLogo.file_size_bytes && (
+                          <span className="font-mono text-[10px] text-gray-400">
+                            {(primaryLogo.file_size_bytes / 1024).toFixed(0)} KB
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions Footer */}
+                  {primaryLogo ? (
+                    <div className="pt-4 border-t border-gray-100 flex items-center gap-2 mt-4">
+                      <a
+                        href={primaryLogo.signedUrl}
+                        download={primaryLogo.original_filename || 'logo_primary.png'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex-1 py-2 px-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Baixar</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => primaryLogoInputRef.current?.click()}
+                        className="flex-1 py-2 px-3 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Trocar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleLogoDelete('logo_primary', 'Logo Principal')}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
+                        title="Remover logotipo"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* 2. LOGO SECUNDÁRIO / ÍCONE */}
+                <div className="bg-white border border-gray-200 rounded-2xl p-5 flex flex-col justify-between shadow-2xs relative overflow-hidden group">
+                  {uploadingLogoType === 'logo_secondary' && (
+                    <div className="absolute inset-0 bg-white/90 backdrop-blur-2xs z-20 flex flex-col items-center justify-center gap-2 text-xs font-bold text-gray-700">
+                      <Loader2 className="w-6 h-6 animate-spin text-black" />
+                      <span>Salvando Logo Secundário...</span>
+                    </div>
+                  )}
+
+                  <input
+                    ref={secondaryLogoInputRef}
+                    type="file"
+                    accept="image/png,image/svg+xml,image/webp,image/jpeg"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleLogoUpload('logo_secondary', file);
+                      e.target.value = '';
+                    }}
+                  />
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                        <h4 className="font-bold text-gray-900 text-xs uppercase tracking-wider">Logo Secundário / Ícone</h4>
+                      </div>
+                      {secondaryLogo && (
+                        <span className="text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
+                          Ativo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 leading-relaxed min-h-[32px]">
+                      Versão reduzida, símbolo, monograma ou assinatura compacta para avatares e rodapés.
+                    </p>
+
+                    {/* Preview Area */}
+                    {secondaryLogo?.signedUrl ? (
+                      <div className="w-full h-44 rounded-xl border border-gray-200 bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:12px_12px] bg-gray-50/60 p-4 flex items-center justify-center relative group/img overflow-hidden">
+                        <img
+                          src={secondaryLogo.signedUrl}
+                          alt="Logo Secundário"
+                          className="max-h-full max-w-full object-contain filter drop-shadow-2xs transition group-hover/img:scale-105"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        onClick={() => secondaryLogoInputRef.current?.click()}
+                        className="w-full h-44 border-2 border-dashed border-gray-300 hover:border-black rounded-xl flex flex-col items-center justify-center p-4 cursor-pointer bg-gray-50/40 hover:bg-gray-50 transition text-center space-y-2"
+                      >
+                        <div className="w-9 h-9 rounded-xl bg-white border border-gray-200 flex items-center justify-center text-gray-400 shadow-2xs">
+                          <Upload className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-gray-800 block">Enviar Símbolo / Ícone</span>
+                          <span className="text-[10px] text-gray-400">PNG transparente, SVG ou WEBP</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {secondaryLogo && (
+                      <div className="text-[11px] text-gray-500 flex items-center justify-between px-1">
+                        <span className="truncate max-w-[170px]" title={secondaryLogo.original_filename}>
+                          {secondaryLogo.original_filename || 'logo_secondary.png'}
+                        </span>
+                        {secondaryLogo.file_size_bytes && (
+                          <span className="font-mono text-[10px] text-gray-400">
+                            {(secondaryLogo.file_size_bytes / 1024).toFixed(0)} KB
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions Footer */}
+                  {secondaryLogo ? (
+                    <div className="pt-4 border-t border-gray-100 flex items-center gap-2 mt-4">
+                      <a
+                        href={secondaryLogo.signedUrl}
+                        download={secondaryLogo.original_filename || 'logo_secondary.png'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex-1 py-2 px-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Baixar</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => secondaryLogoInputRef.current?.click()}
+                        className="flex-1 py-2 px-3 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Trocar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleLogoDelete('logo_secondary', 'Logo Secundário')}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
+                        title="Remover logotipo"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* 3. LOGO MONOCROMÁTICO / BRANCO (COM FUNDO ESCURO DEDICADO) */}
+                <div className="bg-white border border-gray-200 rounded-2xl p-5 flex flex-col justify-between shadow-2xs relative overflow-hidden group">
+                  {uploadingLogoType === 'logo_monochrome' && (
+                    <div className="absolute inset-0 bg-white/90 backdrop-blur-2xs z-20 flex flex-col items-center justify-center gap-2 text-xs font-bold text-gray-700">
+                      <Loader2 className="w-6 h-6 animate-spin text-black" />
+                      <span>Salvando Logo Monocromático...</span>
+                    </div>
+                  )}
+
+                  <input
+                    ref={monochromeLogoInputRef}
+                    type="file"
+                    accept="image/png,image/svg+xml,image/webp,image/jpeg"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleLogoUpload('logo_monochrome', file);
+                      e.target.value = '';
+                    }}
+                  />
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-zinc-900 border border-zinc-700" />
+                        <h4 className="font-bold text-gray-900 text-xs uppercase tracking-wider">Monocromático / Branco</h4>
+                      </div>
+                      {monochromeLogo && (
+                        <span className="text-[10px] font-bold bg-zinc-900 text-[#CEF52A] px-2 py-0.5 rounded-full">
+                          Ativo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-gray-500 leading-relaxed min-h-[32px]">
+                      Versão branca/vazada ideal para contraste máximo em fundos pretos ou escuros.
+                    </p>
+
+                    {/* Preview Area (Dark Container para contraste de logo branco) */}
+                    {monochromeLogo?.signedUrl ? (
+                      <div className="w-full h-44 rounded-xl border border-zinc-800 bg-[#090B0E] p-4 flex items-center justify-center relative group/img overflow-hidden">
+                        <div className="absolute inset-0 bg-[radial-gradient(#1f242d_1px,transparent_1px)] [background-size:12px_12px] opacity-40 pointer-events-none" />
+                        <img
+                          src={monochromeLogo.signedUrl}
+                          alt="Logo Monocromático"
+                          className="max-h-full max-w-full object-contain filter drop-shadow-[0_2px_8px_rgba(255,255,255,0.15)] relative z-10 transition group-hover/img:scale-105"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        onClick={() => monochromeLogoInputRef.current?.click()}
+                        className="w-full h-44 border-2 border-dashed border-gray-300 hover:border-black rounded-xl flex flex-col items-center justify-center p-4 cursor-pointer bg-gray-50/40 hover:bg-gray-50 transition text-center space-y-2"
+                      >
+                        <div className="w-9 h-9 rounded-xl bg-zinc-900 text-[#CEF52A] border border-zinc-800 flex items-center justify-center shadow-2xs">
+                          <Upload className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-gray-800 block">Enviar Versão Branca</span>
+                          <span className="text-[10px] text-gray-400">PNG transparente branco ou SVG</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {monochromeLogo && (
+                      <div className="text-[11px] text-gray-500 flex items-center justify-between px-1">
+                        <span className="truncate max-w-[170px]" title={monochromeLogo.original_filename}>
+                          {monochromeLogo.original_filename || 'logo_monochrome.png'}
+                        </span>
+                        {monochromeLogo.file_size_bytes && (
+                          <span className="font-mono text-[10px] text-gray-400">
+                            {(monochromeLogo.file_size_bytes / 1024).toFixed(0)} KB
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions Footer */}
+                  {monochromeLogo ? (
+                    <div className="pt-4 border-t border-gray-100 flex items-center gap-2 mt-4">
+                      <a
+                        href={monochromeLogo.signedUrl}
+                        download={monochromeLogo.original_filename || 'logo_monochrome.png'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex-1 py-2 px-3 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Baixar</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => monochromeLogoInputRef.current?.click()}
+                        className="flex-1 py-2 px-3 bg-black hover:bg-zinc-800 text-[#CEF52A] rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Trocar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleLogoDelete('logo_monochrome', 'Logo Monocromático')}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition"
+                        title="Remover logotipo"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= ABA 4: DIRETRIZES MANUAIS ================= */}
           {activeTab === 'guidelines' && (
             <div className="space-y-6">
               <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4 shadow-2xs">
@@ -1075,7 +1791,7 @@ export default function ClientProfilePage() {
                             Cores Identificadas na Peça
                           </span>
                           <div className="flex items-center gap-2 flex-wrap">
-                            {(a.colors.palette || []).map((col, idx) => (
+                            {(a.colors?.palette || []).map((col, idx) => (
                               <div
                                 key={idx}
                                 className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-200 bg-white"
@@ -1096,9 +1812,9 @@ export default function ClientProfilePage() {
                             Diagramação & Composição
                           </span>
                           <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1 text-gray-600">
-                            <p><strong>Estilo:</strong> {a.composition.layoutStyle}</p>
-                            <p><strong>Alinhamento:</strong> {a.composition.alignment}</p>
-                            <p><strong>Espaço Negativo / Respiro:</strong> {a.composition.whiteSpace}</p>
+                            <p><strong>Estilo:</strong> {a.composition?.layoutStyle || 'Não identificado'}</p>
+                            <p><strong>Alinhamento:</strong> {a.composition?.alignment || 'Não identificado'}</p>
+                            <p><strong>Espaço Negativo / Respiro:</strong> {a.composition?.whiteSpace || 'Não identificado'}</p>
                           </div>
                         </div>
 
@@ -1108,9 +1824,9 @@ export default function ClientProfilePage() {
                             Tipografia
                           </span>
                           <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1 text-gray-600">
-                            <p><strong>Estilo Dominante:</strong> {a.typography.primaryStyle}</p>
-                            <p><strong>Peso dos Títulos:</strong> {a.typography.titleWeight}</p>
-                            {a.typography.observedFamilies?.length > 0 && (
+                            <p><strong>Estilo Dominante:</strong> {a.typography?.primaryStyle || 'Não identificado'}</p>
+                            <p><strong>Peso dos Títulos:</strong> {a.typography?.titleWeight || 'Não identificado'}</p>
+                            {a.typography?.observedFamilies && a.typography.observedFamilies.length > 0 && (
                               <p><strong>Fontes Observadas:</strong> {a.typography.observedFamilies.join(', ')}</p>
                             )}
                           </div>

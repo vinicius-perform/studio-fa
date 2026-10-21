@@ -58,9 +58,9 @@ describe('Phase A — Foundation, Auth, Permissions, Isolation & Integrations', 
     });
 
     it('dispatches default redirect route according to user role', () => {
-      expect(getDefaultRouteForRole('owner')).toBe('/');
-      expect(getDefaultRouteForRole('admin')).toBe('/');
-      expect(getDefaultRouteForRole('designer')).toBe('/create');
+      expect(getDefaultRouteForRole('owner')).toBe('/creative-chat');
+      expect(getDefaultRouteForRole('admin')).toBe('/creative-chat');
+      expect(getDefaultRouteForRole('designer')).toBe('/creative-chat');
       expect(getDefaultRouteForRole('viewer')).toBe('/projects');
       expect(getDefaultRouteForRole(null)).toBe('/login');
       expect(getDefaultRouteForRole(undefined)).toBe('/login');

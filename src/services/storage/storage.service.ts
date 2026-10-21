@@ -10,10 +10,10 @@ export interface StorageUploadResult {
 }
 
 export interface Base64UploadInput {
-  bucket: 'client-brand-assets' | 'client-pieces' | 'custom-fonts';
+  bucket: 'client-brand-assets' | 'client-pieces' | 'custom-fonts' | 'generated-assets';
   organizationId: string;
   clientId: string;
-  folder: 'logos' | 'pieces' | 'fonts' | 'references';
+  folder: 'logos' | 'pieces' | 'fonts' | 'references' | 'generated' | 'backgrounds';
   originalFilename: string;
   base64Data: string; // pode ser data URL "data:image/png;base64,..." ou pura
   mimeType?: string;
@@ -96,10 +96,10 @@ export class StorageService {
    * Salva arquivo a partir de um Buffer bruto.
    */
   public static async uploadBuffer(params: {
-    bucket: 'client-brand-assets' | 'client-pieces' | 'custom-fonts';
+    bucket: 'client-brand-assets' | 'client-pieces' | 'custom-fonts' | 'generated-assets';
     organizationId: string;
     clientId: string;
-    folder: 'logos' | 'pieces' | 'fonts' | 'references';
+    folder: 'logos' | 'pieces' | 'fonts' | 'references' | 'generated' | 'backgrounds';
     originalFilename: string;
     buffer: Buffer;
     mimeType: string;
@@ -128,8 +128,11 @@ export class StorageService {
     };
   }
 
+  private static signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+
   /**
    * Gera URL assinada com expiração controlada para visualização segura.
+   * Utiliza cache em memória com verificação de TTL para evitar chamadas redundantes.
    */
   public static async createSignedUrl(
     bucket: string,
@@ -143,6 +146,14 @@ export class StorageService {
       return storagePath;
     }
 
+    const now = Date.now();
+    const cacheKey = `${bucket}:${storagePath}`;
+    const cached = this.signedUrlCache.get(cacheKey);
+    // Se ainda restam pelo menos 5 minutos de validade, reutiliza a URL assinada
+    if (cached && cached.expiresAt > now + 300_000) {
+      return cached.url;
+    }
+
     try {
       const supabase = getServiceRoleClient();
       const { data, error } = await supabase.storage
@@ -153,6 +164,11 @@ export class StorageService {
         console.warn(`[StorageService] Não foi possível gerar signed URL para ${bucket}/${storagePath}:`, error?.message);
         return null;
       }
+
+      this.signedUrlCache.set(cacheKey, {
+        url: data.signedUrl,
+        expiresAt: now + expiresInSeconds * 1000,
+      });
 
       return data.signedUrl;
     } catch (err: any) {

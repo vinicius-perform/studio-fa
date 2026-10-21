@@ -58,16 +58,13 @@ export function canWriteData(role?: string | null): boolean {
  * Retorna a rota padrão de redirecionamento pós-login com base na role.
  */
 export function getDefaultRouteForRole(role?: string | null): string {
-  if (isAdmin(role)) {
-    return '/';
-  }
-  if (role === 'designer') {
-    return '/create';
+  if (!role) {
+    return '/login';
   }
   if (role === 'viewer') {
     return '/projects';
   }
-  return '/login';
+  return '/creative-chat';
 }
 
 /**

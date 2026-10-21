@@ -15,6 +15,7 @@ export async function GET() {
       return NextResponse.json({
         configured: Boolean(effectiveKey && effectiveKey.length > 5),
         previewKey: effectiveKey ? `${effectiveKey.slice(0, 7)}...${effectiveKey.slice(-4)}` : null,
+        imageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-sunburst',
       });
     }
 
@@ -23,10 +24,12 @@ export async function GET() {
 
     const service = new IntegrationService(supabase);
     const info = await service.getProviderInfo(session.organizationId, 'openai');
+    const imageModel = await service.resolveOpenAIModel(session.organizationId, 'image');
 
     return NextResponse.json({
       configured: info.configured,
       previewKey: info.maskedSecret || null,
+      imageModel,
     });
   } catch (err: any) {
     if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });

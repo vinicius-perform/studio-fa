@@ -5,15 +5,15 @@ import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard,
   Users,
-  Sparkles,
   FolderKanban,
   Settings,
   ShieldCheck,
   Building2,
   LogOut,
   UserCheck,
+  Bot,
+  Home,
 } from 'lucide-react';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { isAdmin, formatRoleLabel, type UserRole } from '@/lib/auth/permissions';
@@ -49,7 +49,6 @@ export function AppSidebar() {
         } = await supabase.auth.getUser();
 
         if (!user) {
-          // Se não há usuário, verifica se está em dev-store
           const isDevStore =
             process.env.NODE_ENV !== 'production' &&
             process.env.NEXT_PUBLIC_ENABLE_DEV_STORE === 'true';
@@ -65,7 +64,6 @@ export function AppSidebar() {
           return;
         }
 
-        // Busca dados do profile e organization_members
         const [{ data: memberData }, { data: profileData }] = await Promise.all([
           (supabase as any)
             .from('organization_members')
@@ -119,23 +117,29 @@ export function AppSidebar() {
     }
   };
 
-  // Definição dos itens de navegação condicionados rigorosamente por Role
   const role = userNav.role;
   const isAdm = isAdmin(role);
 
+  // Nova Navegação Principal:
+  // 1. Início (/home)
+  // 2. Chat Criativo (núcleo único)
+  // 3. Produções
+  // 4. Clientes
+  // 5. Usuários (admin/owner)
+  // 6. Integrações (admin/owner)
   const navItems = [
+    { label: 'Início', href: '/home', icon: Home },
+    ...(role !== 'viewer'
+      ? [{ label: 'Chat Criativo', href: '/creative-chat', icon: Bot }]
+      : []),
+    { label: 'Produções', href: '/projects', icon: FolderKanban },
+    { label: 'Clientes', href: '/clients', icon: Building2 },
     ...(isAdm
       ? [
-          { label: 'Painel Operacional', href: '/', icon: LayoutDashboard },
           { label: 'Usuários', href: '/users', icon: UserCheck },
           { label: 'Integrações', href: '/settings/integrations', icon: Settings },
         ]
       : []),
-    ...(role !== 'viewer'
-      ? [{ label: 'Criação', href: '/create', icon: Sparkles }]
-      : []),
-    { label: 'Produções', href: '/projects', icon: FolderKanban },
-    { label: 'Clientes', href: '/clients', icon: Building2 },
   ];
 
   const initials = userNav.fullName
@@ -149,13 +153,13 @@ export function AppSidebar() {
     <aside className="w-full md:w-64 bg-fa-dark text-white p-6 flex flex-col justify-between shrink-0 border-r border-fa-border min-h-screen">
       <div>
         {/* Brand Logo */}
-        <Link href={isAdm ? '/' : role === 'designer' ? '/create' : '/projects'} className="flex items-center gap-3 mb-8 group">
+        <Link href="/home" className="flex items-center gap-3 mb-8 group">
           <div className="w-8 h-8 rounded bg-fa-green flex items-center justify-center font-bold text-black text-sm tracking-tight transition-transform group-hover:scale-105 shadow-sm">
             FA
           </div>
           <div>
             <h1 className="font-bold tracking-tight text-white text-base">Studio FA</h1>
-            <p className="text-xs text-gray-400">Estúdio Criativo com IA</p>
+            <p className="text-xs text-gray-400">Criação Visual com IA</p>
           </div>
         </Link>
 
@@ -164,8 +168,8 @@ export function AppSidebar() {
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive =
-              item.href === '/'
-                ? pathname === '/'
+              item.href === '/creative-chat'
+                ? pathname === '/creative-chat' || pathname.startsWith('/creative-chat') || pathname === '/create'
                 : pathname === item.href || pathname.startsWith(item.href + '/');
 
             return (

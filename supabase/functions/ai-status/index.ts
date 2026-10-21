@@ -17,7 +17,7 @@ Deno.serve(async (req: Request) => {
     // Read environment variables server-side
     const apiKey = Deno.env.get('OPENAI_API_KEY');
     const visionModel = Deno.env.get('OPENAI_VISION_MODEL') ?? 'gpt-4o';
-    const imageModel = Deno.env.get('OPENAI_IMAGE_MODEL') ?? 'dall-e-3';
+    const imageModel = Deno.env.get('OPENAI_IMAGE_MODEL') ?? 'gpt-image-2.5-flare';
     const embeddingModel = Deno.env.get('OPENAI_EMBEDDING_MODEL') ?? 'text-embedding-3-small';
 
     const isConfigured = Boolean(apiKey && apiKey.trim().length > 0);

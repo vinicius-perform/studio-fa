@@ -50,7 +50,7 @@ export default function IntegrationsPage() {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [textModel, setTextModel] = useState('gpt-4o');
   const [visionModel, setVisionModel] = useState('gpt-4o');
-  const [imageModel, setImageModel] = useState('dall-e-3');
+  const [imageModel, setImageModel] = useState('gpt-image-2.5-flare');
 
   const [savingOpenAI, setSavingOpenAI] = useState(false);
   const [testingOpenAI, setTestingOpenAI] = useState(false);
@@ -66,7 +66,7 @@ export default function IntegrationsPage() {
           setOpenaiInfo(data.openai);
           setTextModel(data.openai.settings?.textModel || 'gpt-4o');
           setVisionModel(data.openai.settings?.visionModel || 'gpt-4o');
-          setImageModel(data.openai.settings?.imageModel || 'dall-e-3');
+          setImageModel(data.openai.settings?.imageModel || 'gpt-image-2.5-flare');
         }
       }
     } catch (e) {
@@ -252,7 +252,7 @@ export default function IntegrationsPage() {
 
               <p className="text-xs text-gray-600 leading-relaxed mb-5">
                 Utilizado para o motor de análise visual de identidade, extração de diretrizes de marca,
-                redação de copys editoriais e geração de artes fotográficas via DALL-E-3.
+                redação de copys editoriais e geração de artes fotográficas via GPT Image 2.5 (Flare / Sunburst).
               </p>
 
               {openaiInfo?.configured && (
@@ -318,7 +318,8 @@ export default function IntegrationsPage() {
                       onChange={(e) => setImageModel(e.target.value)}
                       className="w-full px-2.5 py-1.5 text-xs bg-white border border-gray-200 rounded-lg text-gray-800"
                     >
-                      <option value="dall-e-3">dall-e-3</option>
+                      <option value="gpt-image-2.5-flare">gpt-image-2.5-flare (Rápido)</option>
+                      <option value="gpt-image-2.5-sunburst">gpt-image-2.5-sunburst (Alta Fidelidade)</option>
                     </select>
                   </div>
                 </div>

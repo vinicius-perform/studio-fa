@@ -21,7 +21,7 @@ export async function GET(req: Request) {
           settings: {
             textModel: 'gpt-4o',
             visionModel: 'gpt-4o',
-            imageModel: 'dall-e-3',
+            imageModel: 'gpt-image-2.5-flare',
           },
         },
       });

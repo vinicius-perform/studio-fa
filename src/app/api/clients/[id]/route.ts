@@ -102,9 +102,15 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const primaryLogo = signedAssets.find((a: any) => a.asset_type === 'logo_primary');
 
-    // Monta DNA amigável para exibição legível
-    let dnaOutput = client.dna;
-    if (!dnaOutput && profile) {
+    // Determina se já existe um Brand DNA consolidado válido
+    const hasValidDna =
+      client.dna &&
+      typeof client.dna === 'object' &&
+      Object.keys(client.dna).length > 0 &&
+      Boolean(client.dna.summary || client.dna.colorSystem);
+
+    let dnaOutput = hasValidDna ? client.dna : null;
+    if (!dnaOutput && profile && client.visual_memory_status === 'ready') {
       dnaOutput = {
         version: profile.version || 1,
         lastConsolidatedAt: profile.updated_at || profile.created_at,
@@ -302,11 +308,21 @@ export async function DELETE(req: Request, { params }: { params: { id: string } 
 
     await requireClientAccess(supabase, session, clientId);
 
-    // Marca como archived ou deleta
+    // Busca cliente para liberar seu slug no arquivamento
+    const { data: clientToArchive } = await (supabase as any)
+      .from('clients')
+      .select('slug')
+      .eq('id', clientId)
+      .maybeSingle();
+
+    const freedSlug = clientToArchive?.slug ? `${clientToArchive.slug}-archived-${Date.now()}` : undefined;
+
+    // Marca como archived e libera o slug para permitir recadastro imediato com o mesmo nome
     const { error: deleteErr } = await (supabase as any)
       .from('clients')
       .update({
         status: 'archived',
+        ...(freedSlug ? { slug: freedSlug } : {}),
         archived_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })

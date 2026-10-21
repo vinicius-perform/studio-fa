@@ -1,729 +1,412 @@
+// src/app/projects/[id]/page.tsx
 'use client';
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import dynamic from 'next/dynamic';
-import { EditorHeader } from '@/components/editor/EditorHeader';
-import { SlidesPanel } from '@/components/editor/SlidesPanel';
-import { InspectorPanel } from '@/components/editor/InspectorPanel';
-
-const StudioCanvas = dynamic(
-  () => import('@/components/editor/StudioCanvas'),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex items-center justify-center h-full text-zinc-500 text-xs">
-        Carregando canvas...
-      </div>
-    ),
-  }
-);
-import { getFormatDefinition } from '@/config/formats';
+import Link from 'next/link';
+import { AppSidebar } from '@/components/layout/AppSidebar';
+import {
+  ArrowLeft,
+  Download,
+  Bot,
+  Calendar,
+  Building2,
+  Maximize2,
+  Archive,
+  RefreshCw,
+  FolderKanban,
+  Layers,
+  Sparkles,
+  ExternalLink,
+} from 'lucide-react';
 import { ExportService } from '@/services/export/export.service';
-import { getSupabaseBrowserClient } from '@/lib/supabase/client';
-import type { SlideDocument, Layer, SlideCompositionRow } from '@/types/domain/composition';
-import type { AIPresetId } from '@/config/presets';
-import { AlertCircle, CheckCircle2, Download, X } from 'lucide-react';
 
-export default function StudioEditorPage() {
+interface ProductionDetail {
+  id: string;
+  name: string;
+  format: string;
+  status: 'active' | 'archived';
+  created_at: string;
+  client: {
+    id: string;
+    name: string;
+    slug?: string;
+    niche?: string;
+  };
+  slides: {
+    id: string;
+    slide_index: number;
+    thumbnail_url?: string;
+    image_url?: string;
+  }[];
+  conversation_id?: string;
+}
+
+export default function ProductionDetailPage() {
   const params = useParams();
   const router = useRouter();
   const projectId = params.id as string;
 
-  // Project state
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [project, setProject] = useState<any>(null);
-  const [slides, setSlides] = useState<any[]>([]);
-  const [compositions, setCompositions] = useState<Record<string, { doc: SlideDocument; revision: number }>>({});
-  const [brandProfile, setBrandProfile] = useState<any>(null);
-  const [brandAssets, setBrandAssets] = useState<any[]>([]);
-  const [references, setReferences] = useState<any[]>([]);
-
-  // Editor interaction state
-  const [activeSlideId, setActiveSlideId] = useState<string>('');
-  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState<number>(0.55);
-  const [showSafeAreas, setShowSafeAreas] = useState<boolean>(true);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [production, setProduction] = useState<ProductionDetail | null>(null);
+  const [selectedSlideIndex, setSelectedSlideIndex] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
-  const [isApproving, setIsApproving] = useState(false);
+  const [isTogglingArchive, setIsTogglingArchive] = useState(false);
 
-  // Undo / Redo stacks per active slide
-  const [undoStack, setUndoStack] = useState<SlideDocument[]>([]);
-  const [redoStack, setRedoStack] = useState<SlideDocument[]>([]);
-
-  // Modals state
-  const [showBrandCheckModal, setShowBrandCheckModal] = useState(false);
-  const [brandCheckResults, setBrandCheckResults] = useState<{ pass: boolean; items: { label: string; ok: boolean; message: string }[] } | null>(null);
-  const [showExportModal, setShowExportModal] = useState(false);
-
-  // Autosave timer ref
-  const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // 1. Fetch Project Data on mount
   useEffect(() => {
-    async function loadProject() {
+    async function loadProduction() {
       try {
         setLoading(true);
         const res = await fetch(`/api/projects/${projectId}`);
         if (!res.ok) {
-          throw new Error('Falha ao carregar dados do projeto');
+          throw new Error('Falha ao carregar os detalhes da produção.');
         }
         const data = await res.json();
-        setProject(data.project);
-        setSlides(data.slides || []);
-        setBrandProfile(data.brandProfile);
-        setBrandAssets(data.brandAssets || []);
-        setReferences(data.references || []);
+        
+        // Mapeia slides para obter URLs de imagens salvas
+        const slides = (data.slides || []).map((s: any, idx: number) => {
+          // Busca URL da composição antiga ou asset direto
+          let url = s.thumbnail_url;
+          if (!url && data.compositions) {
+            const comp = data.compositions.find((c: any) => c.slide_id === s.id);
+            if (comp?.document?.layers) {
+              const bg = comp.document.layers.find((l: any) => l.type === 'background' || l.type === 'image');
+              if (bg?.imageUrl) url = bg.imageUrl;
+            }
+          }
+          return {
+            id: s.id,
+            slide_index: s.slide_index ?? idx,
+            thumbnail_url: url || s.thumbnail_url,
+            image_url: url || s.thumbnail_url,
+          };
+        });
 
-        // Index compositions by slide_id
-        const compMap: Record<string, { doc: SlideDocument; revision: number }> = {};
-        if (data.compositions) {
-          data.compositions.forEach((c: SlideCompositionRow) => {
-            compMap[c.slide_id] = {
-              doc: c.document as unknown as SlideDocument,
-              revision: c.revision,
-            };
-          });
-        }
-        setCompositions(compMap);
-
-        if (data.slides && data.slides.length > 0) {
-          setActiveSlideId(data.slides[0].id);
-        }
+        setProduction({
+          id: data.project.id,
+          name: data.project.name,
+          format: data.project.format || '4:5',
+          status: data.project.status || 'active',
+          created_at: data.project.created_at,
+          client: data.project.client || {
+            id: data.project.client_id,
+            name: 'Cliente',
+            slug: 'cliente',
+          },
+          slides,
+          conversation_id: data.project.conversation_id,
+        });
       } catch (err: any) {
-        setError(err.message || 'Erro ao carregar o estúdio.');
+        setError(err.message || 'Erro ao carregar produção.');
       } finally {
         setLoading(false);
       }
     }
 
     if (projectId) {
-      loadProject();
+      loadProduction();
     }
   }, [projectId]);
 
-  // Current active slide and its document
-  const activeSlide = slides.find((s) => s.id === activeSlideId);
-  const activeComp = activeSlideId ? compositions[activeSlideId] : null;
-  const activeDoc: SlideDocument | null = activeComp?.doc || null;
+  // Download da imagem selecionada
+  const handleDownloadActive = async () => {
+    if (!production) return;
+    const activeSlide = production.slides[selectedSlideIndex] || production.slides[0];
+    const imgUrl = activeSlide?.image_url;
+    if (!imgUrl) return;
 
-  const formatDef = getFormatDefinition(project?.format || 'instagram_feed_4_5');
-
-  const lastUndoPushRef = useRef<number>(0);
-
-  // 2. Debounced Autosave
-  const triggerAutosave = useCallback(
-    (slideId: string, doc: SlideDocument, expectedRev: number) => {
-      if (autosaveTimerRef.current) {
-        clearTimeout(autosaveTimerRef.current);
-      }
-
-      setSaveStatus((prev) => (prev === 'saving' ? prev : 'saving'));
-
-      autosaveTimerRef.current = setTimeout(async () => {
-        try {
-          const res = await fetch('/api/compositions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              slideId,
-              projectId,
-              organizationId: project.organization_id,
-              document: doc,
-              expectedRevision: expectedRev,
-            }),
-          });
-
-          if (!res.ok) {
-            throw new Error('Erro ao salvar composição');
-          }
-
-          const { composition } = await res.json();
-          setCompositions((prev) => ({
-            ...prev,
-            [slideId]: {
-              doc: composition.document,
-              revision: composition.revision,
-            },
-          }));
-          setSaveStatus('saved');
-        } catch (err) {
-          console.error('Autosave falhou:', err);
-          setSaveStatus('error');
-        }
-      }, 1000);
-    },
-    [projectId, project?.organization_id]
-  );
-
-  // 3. Document update handler with Undo history
-  const updateActiveDocument = useCallback(
-    (newDoc: SlideDocument, forceUndo: boolean = false) => {
-      if (!activeSlideId || !activeComp) return;
-
-      const now = Date.now();
-      if (forceUndo || now - lastUndoPushRef.current > 800) {
-        setUndoStack((prev) => [activeComp.doc, ...prev.slice(0, 29)]);
-        setRedoStack([]); // Clear redo upon new change
-        lastUndoPushRef.current = now;
-      }
-
-      setCompositions((prev) => ({
-        ...prev,
-        [activeSlideId]: {
-          ...prev[activeSlideId],
-          doc: newDoc,
-        },
-      }));
-
-      triggerAutosave(activeSlideId, newDoc, activeComp.revision);
-    },
-    [activeSlideId, activeComp, triggerAutosave]
-  );
-
-  // Layer manipulation helpers
-  const handleUpdateLayer = (layerId: string, updates: Partial<Layer>) => {
-    if (!activeDoc) return;
-    const newLayers = activeDoc.layers.map((l) =>
-      l.id === layerId ? ({ ...l, ...updates } as Layer) : l
-    );
-    updateActiveDocument({ ...activeDoc, layers: newLayers });
-  };
-
-  const handleAddLayer = (newLayer: Layer) => {
-    if (!activeDoc) return;
-    updateActiveDocument(
-      {
-        ...activeDoc,
-        layers: [...activeDoc.layers, newLayer],
-      },
-      true
-    );
-  };
-
-  const handleDeleteLayer = (layerId: string) => {
-    if (!activeDoc) return;
-    updateActiveDocument(
-      {
-        ...activeDoc,
-        layers: activeDoc.layers.filter((l) => l.id !== layerId),
-      },
-      true
-    );
-    if (selectedLayerId === layerId) setSelectedLayerId(null);
-  };
-
-  const handleReorderLayers = (newLayers: Layer[]) => {
-    if (!activeDoc) return;
-    updateActiveDocument({ ...activeDoc, layers: newLayers }, true);
-  };
-
-  // Undo / Redo
-  const handleUndo = () => {
-    if (undoStack.length === 0 || !activeSlideId || !activeComp) return;
-    const [previous, ...restUndo] = undoStack;
-    setRedoStack((prev) => [activeComp.doc, ...prev]);
-    setUndoStack(restUndo);
-
-    setCompositions((prev) => ({
-      ...prev,
-      [activeSlideId]: {
-        ...prev[activeSlideId],
-        doc: previous,
-      },
-    }));
-    triggerAutosave(activeSlideId, previous, activeComp.revision);
-  };
-
-  const handleRedo = () => {
-    if (redoStack.length === 0 || !activeSlideId || !activeComp) return;
-    const [next, ...restRedo] = redoStack;
-    setUndoStack((prev) => [activeComp.doc, ...prev]);
-    setRedoStack(restRedo);
-
-    setCompositions((prev) => ({
-      ...prev,
-      [activeSlideId]: {
-        ...prev[activeSlideId],
-        doc: next,
-      },
-    }));
-    triggerAutosave(activeSlideId, next, activeComp.revision);
-  };
-
-  // Slide creation & management
-  const handleAddSlide = async () => {
+    setIsExporting(true);
     try {
-      const nextIndex = slides.length;
-      const res = await fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          organizationId: project.organization_id,
-          clientId: project.client_id,
-          title: `Nova Lâmina ${nextIndex + 1}`,
-          projectType: project.project_type,
-          format: project.format,
-          slides: [{ slideIndex: nextIndex, title: `Lâmina ${nextIndex + 1}` }],
-        }),
+      const filename = ExportService.formatFilename({
+        clientSlug: production.client.slug || production.client.name,
+        slideIndex: selectedSlideIndex,
+        ext: 'png',
       });
-
-      // Reload project to get synchronized slides & compositions
-      const refreshRes = await fetch(`/api/projects/${projectId}`);
-      const refreshed = await refreshRes.json();
-      setSlides(refreshed.slides || []);
-      const compMap: Record<string, any> = {};
-      refreshed.compositions.forEach((c: any) => {
-        compMap[c.slide_id] = { doc: c.document, revision: c.revision };
-      });
-      setCompositions(compMap);
-    } catch (err) {
-      console.error('Falha ao adicionar slide:', err);
-    }
-  };
-
-  const handleDuplicateSlide = async (slideId: string) => {
-    const targetComp = compositions[slideId];
-    if (!targetComp) return;
-
-    // Shallow clone doc
-    const clonedDoc: SlideDocument = JSON.parse(JSON.stringify(targetComp.doc));
-    handleAddSlide();
-  };
-
-  const handleDeleteSlide = (slideId: string) => {
-    if (slides.length <= 1) return;
-    const updated = slides.filter((s) => s.id !== slideId);
-    setSlides(updated);
-    if (activeSlideId === slideId) {
-      setActiveSlideId(updated[0].id);
-    }
-  };
-
-  const handleMoveSlide = (currentIndex: number, direction: 'up' | 'down') => {
-    const newIdx = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (newIdx < 0 || newIdx >= slides.length) return;
-
-    const copy = [...slides];
-    const temp = copy[currentIndex];
-    copy[currentIndex] = copy[newIdx];
-    copy[newIdx] = temp;
-    copy.forEach((s, idx) => {
-      s.slide_index = idx;
-    });
-    setSlides(copy);
-  };
-
-  // Title update
-  const handleTitleChange = async (newTitle: string) => {
-    setProject((prev: any) => ({ ...prev, title: newTitle }));
-    await fetch(`/api/projects/${projectId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: newTitle }),
-    });
-  };
-
-  // AI Image Generation Trigger
-  const handleGenerateImage = async (presetId: AIPresetId, variationInstruction?: string) => {
-    if (!activeSlideId || !project) return;
-
-    try {
-      setIsGenerating(true);
-
-      // 1. Enqueue Job
-      const enqueueRes = await fetch('/api/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          organizationId: project.organization_id,
-          clientId: project.client_id,
-          projectId: project.id,
-          slideId: activeSlideId,
-          slideIndex: activeSlide?.slide_index ?? 0,
-          format: project.format,
-          presetId,
-          customVariationInstruction: variationInstruction,
-          isVariation: Boolean(variationInstruction),
-          referenceImageUrl: (activeSlide as any)?.reference_image_url,
-          referenceTitle: (activeSlide as any)?.reference_title,
-        }),
-      });
-
-      if (!enqueueRes.ok) {
-        const errJson = await enqueueRes.json().catch(() => ({}));
-        throw new Error(errJson?.error?.message || 'Falha ao enfileirar geração de IA');
-      }
-      const { job } = await enqueueRes.json();
-
-      // 2. Process Job immediately
-      const processRes = await fetch('/api/jobs/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id }),
-      });
-
-      if (!processRes.ok) {
-        const errJson = await processRes.json().catch(() => ({}));
-        throw new Error(errJson?.error?.message || 'Falha no processamento da imagem por IA');
-      }
-
-      // 3. Reload composition for this slide
-      const compRes = await fetch(`/api/compositions?slideId=${activeSlideId}&organizationId=${project.organization_id}`);
-      const compData = await compRes.json();
-
-      if (compData.composition) {
-        setCompositions((prev) => ({
-          ...prev,
-          [activeSlideId]: {
-            doc: compData.composition.document,
-            revision: compData.composition.revision,
-          },
-        }));
-      }
-    } catch (err: any) {
-      alert(`Erro na geração de imagem: ${err.message}`);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  // Brand Check Execution (Prompt Section 90)
-  const handleRunBrandCheck = () => {
-    if (!activeDoc) return;
-
-    const items = [
-      {
-        label: 'Contraste e Legibilidade',
-        ok: activeDoc.layers.some((l) => l.type === 'overlay' && (l.opacity ?? 0) >= 0.25),
-        message: activeDoc.layers.some((l) => l.type === 'overlay' && (l.opacity ?? 0) >= 0.25)
-          ? 'Overlay de legibilidade ativo protegendo a leitura do texto.'
-          : 'Recomendado ativar ou intensificar overlay sobre o fundo gerado por IA.',
-      },
-      {
-        label: 'Presença do Logo Oficial',
-        ok: activeDoc.layers.some((l) => l.type === 'logo' && l.visible !== false),
-        message: activeDoc.layers.some((l) => l.type === 'logo' && l.visible !== false)
-          ? 'Logo da marca posicionado na composição.'
-          : 'Logo oficial não encontrado nesta lâmina.',
-      },
-      {
-        label: 'Área Segura e Respiro',
-        ok: !activeDoc.layers.some((l) => (l as any).overflowWarning),
-        message: !activeDoc.layers.some((l) => (l as any).overflowWarning)
-          ? 'Nenhum texto ultrapassando os limites recomendados.'
-          : 'Aviso de overflow detectado em uma das caixas de texto. Utilize o Auto-Fit.',
-      },
-      {
-        label: 'Paleta Cromática Oficial',
-        ok: true,
-        message: 'Tipografia e elementos utilizam tonalidades sincronizadas com o DNA Visual.',
-      },
-    ];
-
-    const pass = items.every((i) => i.ok);
-    setBrandCheckResults({ pass, items });
-    setShowBrandCheckModal(true);
-  };
-
-  // Approval Execution (incorporates into client memory pool)
-  const handleApproveProduction = async () => {
-    try {
-      setIsApproving(true);
-      await fetch(`/api/projects/${projectId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'approved' }),
-      });
-
-      setProject((prev: any) => ({ ...prev, status: 'approved' }));
-      alert('Produção aprovada com sucesso! Esta peça agora faz parte da memória visual do cliente.');
-    } catch (err: any) {
-      alert(`Falha ao aprovar projeto: ${err.message}`);
-    } finally {
-      setIsApproving(false);
-    }
-  };
-
-  // Export Trigger
-  const handleExportSlide = async (mode: 'current' | 'all') => {
-    try {
-      setIsExporting(true);
-      const supabase = getSupabaseBrowserClient();
-      const exportService = new ExportService(supabase);
-
-      if (mode === 'current') {
-        if (!activeDoc) return;
-        const canvas = await exportService.renderDocumentToCanvas(
-          activeDoc,
-          formatDef.exportWidth,
-          formatDef.exportHeight
-        );
-        const blob = await exportService.canvasToBlob(canvas, 'image/png');
-        const filename = ExportService.formatFilename({
-          clientSlug: project.client?.slug || 'studio-fa',
-          slideIndex: activeSlide?.slide_index ?? 0,
-        });
-
-        // Trigger browser download
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      } else {
-        // Batch export all slides as ZIP
-        const slideBlobs: { filename: string; blob: Blob }[] = [];
-
-        for (let i = 0; i < slides.length; i++) {
-          const s = slides[i];
-          const c = compositions[s.id];
-          if (c && c.doc) {
-            const canvas = await exportService.renderDocumentToCanvas(
-              c.doc,
-              formatDef.exportWidth,
-              formatDef.exportHeight
-            );
-            const blob = await exportService.canvasToBlob(canvas, 'image/png');
-            const filename = ExportService.formatFilename({
-              clientSlug: project.client?.slug || 'studio-fa',
-              slideIndex: i,
-            });
-            slideBlobs.push({ filename, blob });
-          }
-        }
-
-        const zipBlob = await exportService.generateBatchZip(slideBlobs);
-        const zipFilename = `${ExportService.sanitizeFilename(project.title || 'carrossel')}_export.zip`;
-        const url = URL.createObjectURL(zipBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = zipFilename;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
-
-      setShowExportModal(false);
-    } catch (err: any) {
-      alert(`Falha na exportação: ${err.message}`);
+      await ExportService.triggerBrowserDownload(imgUrl, filename);
     } finally {
       setIsExporting(false);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="h-screen w-screen bg-[#0F1113] flex flex-col items-center justify-center text-white space-y-4">
-        <div className="w-10 h-10 border-4 border-[#CEF52A] border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm font-medium text-zinc-400">Carregando estúdio criativo...</p>
-      </div>
-    );
-  }
+  // Download do carrossel completo em ZIP
+  const handleDownloadAllZip = async () => {
+    if (!production || production.slides.length <= 1) return;
+    setIsExporting(true);
+    try {
+      const imagesToZip = production.slides
+        .filter((s) => Boolean(s.image_url))
+        .map((s, idx) => ({
+          url: s.image_url!,
+          index: idx,
+        }));
 
-  if (error || !project) {
-    return (
-      <div className="h-screen w-screen bg-[#0F1113] flex flex-col items-center justify-center text-white p-6 text-center space-y-4">
-        <AlertCircle className="w-12 h-12 text-rose-500" />
-        <h2 className="text-lg font-bold">Não foi possível abrir o projeto</h2>
-        <p className="text-xs text-zinc-400 max-w-sm">{error || 'Projeto não encontrado'}</p>
-        <button
-          onClick={() => router.push('/projects')}
-          className="px-4 py-2 bg-zinc-800 text-white rounded-lg text-xs font-semibold hover:bg-zinc-700"
-        >
-          Voltar para Projetos
-        </button>
-      </div>
-    );
-  }
+      await ExportService.exportCarouselZip({
+        clientSlug: production.client.slug || production.client.name,
+        images: imagesToZip,
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Arquivar / Desarquivar
+  const handleToggleArchive = async () => {
+    if (!production) return;
+    setIsTogglingArchive(true);
+    try {
+      const newStatus = production.status === 'archived' ? 'active' : 'archived';
+      const res = await fetch(`/api/projects/${production.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (res.ok) {
+        setProduction((prev) => prev ? { ...prev, status: newStatus } : null);
+      }
+    } finally {
+      setIsTogglingArchive(false);
+    }
+  };
+
+  const activeSlide = production?.slides[selectedSlideIndex] || production?.slides[0];
 
   return (
-    <div className="h-screen w-screen bg-[#0B0F17] flex flex-col overflow-hidden select-none">
-      {/* Top Header */}
-      <EditorHeader
-        title={project.title}
-        clientName={project.client?.name}
-        clientBrandStatus={project.client?.brand_status}
-        projectStatus={project.status}
-        saveStatus={saveStatus}
-        zoom={zoom}
-        onZoomChange={setZoom}
-        canUndo={undoStack.length > 0}
-        canRedo={redoStack.length > 0}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        showSafeAreas={showSafeAreas}
-        onToggleSafeAreas={() => setShowSafeAreas((prev) => !prev)}
-        onTitleChange={handleTitleChange}
-        onBrandCheck={handleRunBrandCheck}
-        onExport={() => setShowExportModal(true)}
-        onApprove={handleApproveProduction}
-        isExporting={isExporting}
-        isApproving={isApproving}
-      />
+    <div className="flex h-screen bg-[#090B0E] text-white overflow-hidden">
+      <AppSidebar />
 
-      {/* Main 3-Column Studio Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Slides Panel */}
-        <SlidesPanel
-          slides={slides}
-          activeSlideId={activeSlideId}
-          onSelectSlide={(id) => {
-            setActiveSlideId(id);
-            setSelectedLayerId(null);
-            setUndoStack([]);
-            setRedoStack([]);
-          }}
-          onAddSlide={handleAddSlide}
-          onDuplicateSlide={handleDuplicateSlide}
-          onDeleteSlide={handleDeleteSlide}
-          onMoveSlide={handleMoveSlide}
-          format={formatDef}
-          clientName={project.client?.name || 'Cliente'}
-        />
-
-        {/* Center: Stage Canvas Viewport */}
-        <main className="flex-1 bg-[#141820] flex items-center justify-center p-8 overflow-auto relative">
-          {activeDoc ? (
-            <StudioCanvas
-              document={activeDoc}
-              format={formatDef}
-              zoom={zoom}
-              selectedLayerId={selectedLayerId}
-              onSelectLayer={setSelectedLayerId}
-              onUpdateLayer={handleUpdateLayer}
-              showSafeAreas={showSafeAreas}
-            />
-          ) : (
-            <div className="text-zinc-500 text-xs">Selecione uma lâmina para editar</div>
-          )}
-        </main>
-
-        {/* Right: Inspector Panel */}
-        {activeDoc && (
-          <InspectorPanel
-            document={activeDoc}
-            selectedLayerId={selectedLayerId}
-            brandProfile={brandProfile}
-            brandAssets={brandAssets}
-            references={references}
-            onSelectLayer={setSelectedLayerId}
-            onUpdateLayer={handleUpdateLayer}
-            onAddLayer={handleAddLayer}
-            onDeleteLayer={handleDeleteLayer}
-            onReorderLayers={handleReorderLayers}
-            onGenerateImage={handleGenerateImage}
-            isGenerating={isGenerating}
-          />
-        )}
-      </div>
-
-      {/* MODAL: BRAND CHECK */}
-      {showBrandCheckModal && brandCheckResults && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-[#0F1113] border border-zinc-800 rounded-2xl max-w-md w-full p-6 text-white space-y-5 shadow-2xl">
-            <div className="flex items-center justify-between">
+      <main className="flex-1 flex flex-col h-full overflow-y-auto">
+        {/* Top Navbar */}
+        <header className="h-16 border-b border-zinc-800 bg-[#0E1116] px-6 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-4">
+            <Link
+              href="/projects"
+              className="p-2 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition"
+              title="Voltar para Produções"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </Link>
+            <div>
               <div className="flex items-center gap-2">
-                <span className="w-8 h-8 rounded-full bg-[#CEF52A]/10 text-[#CEF52A] flex items-center justify-center font-bold">
-                  ✓
-                </span>
-                <h3 className="font-bold text-sm">Verificação de Marca (Brand Check)</h3>
+                <h1 className="text-base font-bold text-white tracking-tight">
+                  {production?.name || 'Detalhe da Produção'}
+                </h1>
+                {production?.status === 'archived' && (
+                  <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded">
+                    Arquivada
+                  </span>
+                )}
               </div>
-              <button onClick={() => setShowBrandCheckModal(false)} className="text-zinc-500 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
+              <p className="text-xs text-zinc-400 flex items-center gap-1.5 mt-0.5">
+                <Building2 className="w-3.5 h-3.5 text-zinc-500" />
+                <span>{production?.client.name}</span>
+                <span>•</span>
+                <span className="font-mono text-zinc-500 uppercase">{production?.format}</span>
+              </p>
             </div>
+          </div>
 
-            <div className="space-y-3">
-              {brandCheckResults.items.map((item, idx) => (
-                <div key={idx} className="p-3 bg-zinc-900 rounded-xl border border-zinc-800 flex items-start gap-2.5">
-                  {item.ok ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  )}
-                  <div>
-                    <div className="text-xs font-semibold">{item.label}</div>
-                    <div className="text-[11px] text-zinc-400 mt-0.5">{item.message}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
+          {/* Action Buttons */}
+          <div className="flex items-center gap-3">
+            {production?.client && (
+              <Link
+                href={`/creative-chat?client=${production.client.id}`}
+                className="flex items-center gap-2 px-3 py-1.5 bg-[#CEF52A] hover:bg-[#b8dd24] text-black text-xs font-bold rounded-lg transition shadow-sm"
+              >
+                <Bot className="w-4 h-4" />
+                <span>Continuar no Chat</span>
+              </Link>
+            )}
+
+            {production?.slides && production.slides.length > 1 && (
+              <button
+                onClick={handleDownloadAllZip}
+                disabled={isExporting}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold rounded-lg transition border border-zinc-700"
+              >
+                <Download className="w-4 h-4 text-zinc-400" />
+                <span>Baixar ZIP ({production.slides.length})</span>
+              </button>
+            )}
 
             <button
-              onClick={() => setShowBrandCheckModal(false)}
-              className="w-full py-2.5 bg-[#CEF52A] text-black font-bold text-xs rounded-xl hover:bg-[#b8dd24] transition"
+              onClick={handleDownloadActive}
+              disabled={isExporting || !activeSlide?.image_url}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold rounded-lg transition border border-zinc-700 disabled:opacity-40"
             >
-              Concluir Verificação
+              <Download className="w-4 h-4 text-[#CEF52A]" />
+              <span>Baixar Imagem</span>
+            </button>
+
+            <button
+              onClick={handleToggleArchive}
+              disabled={isTogglingArchive}
+              className="p-2 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition border border-zinc-800"
+              title={production?.status === 'archived' ? 'Desarquivar' : 'Arquivar'}
+            >
+              <Archive className="w-4 h-4" />
             </button>
           </div>
-        </div>
-      )}
+        </header>
 
-      {/* MODAL: EXPORT */}
-      {showExportModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-[#0F1113] border border-zinc-800 rounded-2xl max-w-md w-full p-6 text-white space-y-5 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Download className="w-5 h-5 text-[#CEF52A]" />
-                <h3 className="font-bold text-sm">Exportar Peça Final</h3>
-              </div>
-              <button onClick={() => setShowExportModal(false)} className="text-zinc-500 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-xs text-zinc-400">
-              Dimensões de exportação: <span className="text-white font-mono">{formatDef.exportWidth}x{formatDef.exportHeight}px</span> ({formatDef.aspectRatio}).
-            </p>
-
-            <div className="space-y-3">
-              <button
-                onClick={() => handleExportSlide('current')}
-                disabled={isExporting}
-                className="w-full p-4 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl text-left flex items-center justify-between transition group"
-              >
-                <div>
-                  <div className="text-xs font-bold text-white group-hover:text-[#CEF52A]">
-                    Baixar Lâmina Atual (PNG)
-                  </div>
-                  <div className="text-[11px] text-zinc-400">
-                    Lâmina {(activeSlide?.slide_index ?? 0) + 1} em alta resolução (100% renderizada)
-                  </div>
-                </div>
-                <Download className="w-4 h-4 text-zinc-500 group-hover:text-white" />
-              </button>
-
-              <button
-                onClick={() => handleExportSlide('all')}
-                disabled={isExporting}
-                className="w-full p-4 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl text-left flex items-center justify-between transition group"
-              >
-                <div>
-                  <div className="text-xs font-bold text-white group-hover:text-[#CEF52A]">
-                    Baixar Carrossel Completo (ZIP)
-                  </div>
-                  <div className="text-[11px] text-zinc-400">
-                    Todas as {slides.length} lâminas organizadas e numeradas em alta definição
-                  </div>
-                </div>
-                <Download className="w-4 h-4 text-zinc-500 group-hover:text-white" />
-              </button>
-            </div>
-
-            {isExporting && (
-              <div className="flex items-center justify-center gap-2 text-xs text-[#CEF52A] py-2">
-                <span className="w-3.5 h-3.5 border-2 border-[#CEF52A] border-t-transparent rounded-full animate-spin" />
-                <span>Processando alta resolução...</span>
-              </div>
-            )}
+        {/* Content Body */}
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center text-zinc-500 text-sm">
+            <RefreshCw className="w-5 h-5 animate-spin mr-2 text-[#CEF52A]" />
+            Carregando detalhes da produção...
           </div>
-        </div>
-      )}
+        ) : error || !production ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
+            <p className="text-rose-400 text-sm font-semibold mb-3">{error || 'Produção não encontrada.'}</p>
+            <Link
+              href="/projects"
+              className="px-4 py-2 bg-zinc-800 text-white text-xs rounded-lg hover:bg-zinc-700 transition"
+            >
+              Voltar para Produções
+            </Link>
+          </div>
+        ) : (
+          <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 max-w-7xl mx-auto w-full">
+            {/* Main Image Showcase */}
+            <div className="lg:col-span-8 flex flex-col items-center justify-center bg-[#111419] border border-zinc-800/80 rounded-2xl p-6 relative overflow-hidden min-h-[500px]">
+              {activeSlide?.image_url ? (
+                <div className="relative group max-h-[70vh] flex items-center justify-center">
+                  <img
+                    src={activeSlide.image_url}
+                    alt={production.name}
+                    className="max-h-[68vh] w-auto object-contain rounded-xl shadow-2xl border border-zinc-700/50"
+                  />
+                  <div className="absolute bottom-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <a
+                      href={activeSlide.image_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2 bg-black/80 hover:bg-black text-white rounded-lg backdrop-blur border border-white/20 flex items-center gap-1.5 text-xs font-semibold"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      <span>Ver em tela cheia</span>
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-zinc-500 text-sm text-center">
+                  <Layers className="w-12 h-12 mx-auto mb-2 text-zinc-600" />
+                  Nenhuma imagem disponível nesta lâmina.
+                </div>
+              )}
+
+              {/* Se for carrossel, mostra seletor de lâminas inferior */}
+              {production.slides.length > 1 && (
+                <div className="flex items-center gap-2 mt-6 overflow-x-auto max-w-full pb-2">
+                  {production.slides.map((s, idx) => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSelectedSlideIndex(idx)}
+                      className={`relative rounded-lg overflow-hidden shrink-0 border-2 transition ${
+                        selectedSlideIndex === idx
+                          ? 'border-[#CEF52A] shadow-md scale-105'
+                          : 'border-zinc-800 hover:border-zinc-600 opacity-70 hover:opacity-100'
+                      }`}
+                      style={{ width: '56px', height: '70px' }}
+                    >
+                      {s.thumbnail_url ? (
+                        <img src={s.thumbnail_url} alt={`Lâmina ${idx + 1}`} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full bg-zinc-900 flex items-center justify-center text-[10px] font-bold text-zinc-500">
+                          #{idx + 1}
+                        </div>
+                      )}
+                      <span className="absolute bottom-1 right-1 bg-black/80 text-[9px] text-white px-1 rounded font-mono">
+                        {idx + 1}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Sidebar Details Info */}
+            <div className="lg:col-span-4 space-y-4">
+              <div className="bg-[#12151B] border border-zinc-800/80 rounded-2xl p-5 space-y-4">
+                <h2 className="text-sm font-bold text-white border-b border-zinc-800 pb-3 flex items-center justify-between">
+                  <span>Informações da Peça</span>
+                  <span className="text-[10px] font-mono text-[#CEF52A] bg-[#CEF52A]/10 px-2 py-0.5 rounded border border-[#CEF52A]/20">
+                    IA Concluída
+                  </span>
+                </h2>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Cliente</span>
+                    <span className="text-white font-semibold flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-[#CEF52A]" />
+                      {production.client.name}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Formato</span>
+                    <span className="text-white font-mono bg-zinc-800/80 px-2 py-0.5 rounded border border-zinc-700/60 inline-block uppercase">
+                      {production.format}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Lâminas no projeto</span>
+                    <span className="text-white font-semibold">
+                      {production.slides.length} {production.slides.length === 1 ? 'lâmina (post único)' : 'lâminas (carrossel)'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Data de Criação</span>
+                    <span className="text-zinc-300 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-zinc-500" />
+                      {new Date(production.created_at).toLocaleDateString('pt-BR', {
+                        day: '2-digit',
+                        month: 'long',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-zinc-800 space-y-2">
+                  <button
+                    onClick={handleDownloadActive}
+                    disabled={isExporting || !activeSlide?.image_url}
+                    className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white font-bold rounded-xl transition border border-zinc-700 flex items-center justify-center gap-2 text-xs"
+                  >
+                    <Download className="w-4 h-4 text-[#CEF52A]" />
+                    <span>Baixar Arquivo da Peça</span>
+                  </button>
+
+                  <Link
+                    href={`/creative-chat?client=${production.client.id}`}
+                    className="w-full py-2.5 bg-[#CEF52A] hover:bg-[#b8dd24] text-black font-bold rounded-xl transition shadow-md flex items-center justify-center gap-2 text-xs"
+                  >
+                    <Bot className="w-4 h-4" />
+                    <span>Abrir e Refinar no Chat</span>
+                  </Link>
+                </div>
+              </div>
+
+              {/* Card de Diretrizes Rápidas */}
+              <div className="bg-[#12151B] border border-zinc-800/80 rounded-2xl p-4 text-xs space-y-2">
+                <span className="text-zinc-400 font-bold block flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#CEF52A]" />
+                  Fluxo Conversacional
+                </span>
+                <p className="text-zinc-400 leading-relaxed text-[11px]">
+                  Esta peça foi gerada pelo Chat Criativo integrada ao Brand DNA de {production.client.name}. Para gerar variações ou novas lâminas, continue conversando com a IA.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }

@@ -85,37 +85,59 @@ export async function GET(req: Request) {
       }
     }
 
-    // Popula perfis de marca, peças e signed URLs dos logos
+    // Popula perfis de marca, peças e signed URLs dos logos EM LOTE (eliminando N+1)
+    const clientIds = (clients || []).map((c: any) => c.id);
+
+    let allProfiles: any[] = [];
+    let allLogoAssets: any[] = [];
+    let allPieces: any[] = [];
+
+    if (clientIds.length > 0) {
+      const [profilesRes, logoAssetsRes, piecesRes] = await Promise.all([
+        (supabase as any)
+          .from('brand_profiles')
+          .select('client_id, id, version, summary, colors, typography, graphical_elements')
+          .in('client_id', clientIds)
+          .eq('status', 'approved'),
+        (supabase as any)
+          .from('client_assets')
+          .select('client_id, storage_bucket, storage_path, original_filename')
+          .in('client_id', clientIds)
+          .eq('asset_type', 'logo_primary'),
+        (supabase as any)
+          .from('client_pieces')
+          .select('client_id')
+          .in('client_id', clientIds),
+      ]);
+      allProfiles = profilesRes.data || [];
+      allLogoAssets = logoAssetsRes.data || [];
+      allPieces = piecesRes.data || [];
+    }
+
+    const profilesMap = new Map<string, any>();
+    for (const p of allProfiles) {
+      if (!profilesMap.has(p.client_id)) {
+        profilesMap.set(p.client_id, p);
+      }
+    }
+
+    const logosMap = new Map<string, any>();
+    for (const l of allLogoAssets) {
+      if (!logosMap.has(l.client_id)) {
+        logosMap.set(l.client_id, l);
+      }
+    }
+
+    const piecesCountMap = new Map<string, number>();
+    for (const pc of allPieces) {
+      piecesCountMap.set(pc.client_id, (piecesCountMap.get(pc.client_id) || 0) + 1);
+    }
+
     const populatedClients = await Promise.all(
       (clients || []).map(async (c: any) => {
-        const { data: profileData } = await (supabase as any)
-          .from('brand_profiles')
-          .select('id, version, summary, colors, typography, graphical_elements')
-          .eq('client_id', c.id)
-          .eq('status', 'approved')
-          .maybeSingle();
-
-        const { data: logoAssetData } = await (supabase as any)
-          .from('client_assets')
-          .select('storage_bucket, storage_path, original_filename')
-          .eq('client_id', c.id)
-          .eq('asset_type', 'logo_primary')
-          .maybeSingle();
-
-        // Contagem de peças cadastradas
-        let piecesCount = 0;
-        try {
-          const { count } = await (supabase as any)
-            .from('client_pieces')
-            .select('*', { count: 'exact', head: true })
-            .eq('client_id', c.id);
-          piecesCount = count || 0;
-        } catch {
-          piecesCount = 0;
-        }
-
-        const profile = profileData as any;
-        const logoAsset = logoAssetData as any;
+        const profile = profilesMap.get(c.id) || null;
+        const logoAsset = logosMap.get(c.id) || null;
+        const piecesCount = piecesCountMap.get(c.id) || 0;
         const colorsObj = (profile?.colors as any) || {};
 
         let logoSignedUrl: string | null = null;
@@ -347,11 +369,40 @@ export async function POST(req: Request) {
 
     const orgId = session.organizationId;
 
+    // Resolução e desambiguação inteligente de slug único (evitando violação da constraint uq_client_org_slug)
+    let finalSlug = slug;
+    let slugSuffix = 1;
+    while (true) {
+      const { data: existingSlugRow } = await (supabase as any)
+        .from('clients')
+        .select('id, status, slug')
+        .eq('organization_id', orgId)
+        .eq('slug', finalSlug)
+        .maybeSingle();
+
+      if (!existingSlugRow) {
+        break; // Slug disponível
+      }
+
+      // Se o cliente anterior com esse slug está arquivado, libera o slug renomeando o arquivado
+      if (existingSlugRow.status === 'archived') {
+        const archivedSlug = `${finalSlug}-archived-${Date.now()}`;
+        await (supabase as any)
+          .from('clients')
+          .update({ slug: archivedSlug })
+          .eq('id', existingSlugRow.id);
+        break;
+      }
+
+      slugSuffix++;
+      finalSlug = `${slug}-${slugSuffix}`;
+    }
+
     // Monta payload de inserção de cliente
     const clientInsertPayload: any = {
       organization_id: orgId,
       name: name.trim(),
-      slug,
+      slug: finalSlug,
       niche: niche || null,
       instagram_handle: normalizedInstagram,
       website: website || null,
@@ -411,7 +462,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // Cria Brand Profile inicial
+    // Cria Brand Profile inicial com todas as colunas NOT NULL exigidas pelo schema oficial do Supabase
     await (supabase as any).from('brand_profiles').insert({
       organization_id: orgId,
       client_id: newClient.id,
@@ -430,8 +481,45 @@ export async function POST(req: Request) {
       typography: {
         detectedFonts: Array.from(new Set([primaryFont || 'Inter', ...(detectedFonts || [])])),
         primaryFont: primaryFont || 'Inter',
+        secondaryFont: secondaryFont || 'Inter',
       },
-      graphical_elements: visualStyle ? { style: visualStyle } : {},
+      composition: {
+        layout: 'Grid editorial contemporâneo com respiro visual equilibrado',
+        hierarchy: 'Headlines marcantes com forte contraste tonal',
+        dominantLayout: 'Editorial',
+        whiteSpaceRule: 'Respiro generoso',
+      },
+      photography: {
+        style: 'Alta definição com iluminação refinada e contraste harmonioso',
+        treatment: 'Recorte suave e gradientes sutis',
+        lightingPreference: 'Iluminação cinematográfica de estúdio',
+      },
+      logo_usage: {
+        clearSpace: true,
+        minimalSize: '32px',
+        allowedPlacements: ['top_left', 'top_right'],
+      },
+      graphical_elements: visualStyle ? { style: visualStyle } : { elements: ['Linhas finas', 'Acentos de alto contraste'] },
+      visual_style: visualStyle ? { style: visualStyle } : { aesthetic: 'Moderno, sofisticado e tecnológico' },
+      content_style: {
+        tone: brandVoice || 'Profissional, autoritário e inspirador',
+        voice: brandVoice || 'Objetivo e claro',
+      },
+      spacing_rules: {
+        margins: 'Espaçamentos generosos nas bordas',
+        padding: 'Respiro adequado entre textos e imagens',
+      },
+      dos: [
+        'Preservar alto contraste entre texto e fundo',
+        'Utilizar a paleta oficial aprovada da marca',
+        'Manter espaço negativo adequado para headlines',
+      ],
+      donts: [
+        'Distorcer proporções do logotipo da marca',
+        'Utilizar paletas não aprovadas',
+        'Sobrecarregar layouts com excesso de informação',
+      ],
+      raw_analysis: {},
     });
 
     // Processamento e Upload Seguro de Logos no Supabase Storage (NUNCA Base64 no banco)
@@ -538,6 +626,7 @@ export async function POST(req: Request) {
       },
     });
   } catch (err: any) {
+    console.error('[POST /api/clients] Erro detalhado ao cadastrar cliente:', err?.stack || err?.message || err);
     if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
     if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
     return NextResponse.json(formatError(err), { status: 500 });

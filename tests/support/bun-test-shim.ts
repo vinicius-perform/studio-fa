@@ -68,6 +68,23 @@ function createExpect(actual: any, isNot = false): any {
         }
       }
     },
+    toHaveLength(expected: number) {
+      const len = actual?.length ?? actual?.size ?? 0;
+      if (isNot) {
+        assert.notStrictEqual(len, expected, `Expected length not to be ${expected}`);
+      } else {
+        assert.strictEqual(len, expected, `Expected length ${len} to be ${expected}`);
+      }
+    },
+    toBeCloseTo(expected: number, numDigits = 2) {
+      const precision = Math.pow(10, -numDigits) / 2;
+      const diff = Math.abs(actual - expected);
+      if (isNot) {
+        assert.ok(diff >= precision, `Expected ${actual} not to be close to ${expected}`);
+      } else {
+        assert.ok(diff < precision, `Expected ${actual} to be close to ${expected} (diff: ${diff}, precision: ${precision})`);
+      }
+    },
     toBeLessThan(expected: number) {
       if (isNot) {
         assert.ok(actual >= expected, `Expected ${actual} not to be less than ${expected}`);

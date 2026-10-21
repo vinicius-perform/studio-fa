@@ -40,13 +40,14 @@ export class CompositionService {
     const existing = await this.getBySlideId(params.slideId, params.organizationId);
 
     if (existing) {
-      if (existing.revision !== params.expectedRevision) {
+      const isDifferentUser = existing.updated_by && existing.updated_by !== params.userId;
+      if (isDifferentUser && existing.revision !== params.expectedRevision) {
         throw new ConflictError(
           `Esta lâmina foi atualizada em outra sessão (revisão no servidor: ${existing.revision}, sua revisão: ${params.expectedRevision}). Recarregue para mesclar as alterações.`
         );
       }
 
-      const nextRevision = existing.revision + 1;
+      const nextRevision = Math.max(existing.revision, params.expectedRevision || 1) + 1;
 
       const { data, error } = await this.supabase
         .from('slide_compositions')
@@ -106,8 +107,9 @@ export class CompositionService {
     };
     clientLogoUrl?: string;
     backgroundUrl?: string;
+    backgroundAssetId?: string;
   }): Promise<SlideDocument> {
-    const { format, brandProfile, content, clientLogoUrl, backgroundUrl } = params;
+    const { format, brandProfile, content, clientLogoUrl, backgroundUrl, backgroundAssetId } = params;
 
     const layers: Layer[] = [];
     const w = format.exportWidth;
@@ -125,6 +127,8 @@ export class CompositionService {
         name: 'Background IA',
         type: 'image',
         imageUrl: backgroundUrl,
+        assetId: backgroundAssetId,
+        fit: 'cover',
         x: 0,
         y: 0,
         width: w,
@@ -289,4 +293,51 @@ export class CompositionService {
       layers,
     };
   }
+
+  /**
+   * Atualiza exclusivamente o background visual gerado por IA,
+   * preservando rigorosamente todas as demais layers (títulos, logo, textos, CTA e posições).
+   */
+  public updateBackgroundLayer(
+    document: SlideDocument,
+    newBackgroundUrl: string,
+    newAssetId?: string
+  ): SlideDocument {
+    const updatedLayers = document.layers.map((layer) => {
+      if (layer.id === 'layer-bg' && layer.type === 'image') {
+        return {
+          ...layer,
+          imageUrl: newBackgroundUrl,
+          assetId: newAssetId || layer.assetId,
+          fit: 'cover' as const,
+        };
+      }
+      return layer;
+    });
+
+    const hasBgLayer = updatedLayers.some((l) => l.id === 'layer-bg');
+    if (!hasBgLayer) {
+      updatedLayers.unshift({
+        id: 'layer-bg',
+        name: 'Background IA',
+        type: 'image',
+        imageUrl: newBackgroundUrl,
+        assetId: newAssetId,
+        fit: 'cover',
+        x: 0,
+        y: 0,
+        width: document.canvas.width,
+        height: document.canvas.height,
+        zIndex: 0,
+        visible: true,
+        locked: false,
+      });
+    }
+
+    return {
+      ...document,
+      layers: updatedLayers,
+    };
+  }
 }
+

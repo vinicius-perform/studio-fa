@@ -11,6 +11,7 @@ import {
 import { formatError } from '@/lib/errors';
 import { devStore } from '@/lib/dev-store';
 import { isDevStoreAllowed } from '@/config/env';
+import { StorageService } from '@/services/storage/storage.service';
 
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
@@ -42,60 +43,146 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       return NextResponse.json({ error: { message: 'Projeto não encontrado.' } }, { status: 404 });
     }
 
-    // 2. Fetch Slides ordered by slide_index
-    const { data: slides } = await supabase
-      .from('project_slides')
-      .select('*')
-      .eq('project_id', projectId)
-      .order('slide_index', { ascending: true });
+    // 2. Fetch slides, brand profile, assets, references and creative plan in parallel
+    const [
+      { data: slides },
+      { data: brandProfile },
+      { data: brandAssets },
+      { data: references },
+      { data: creativePlan },
+      { data: clientPieces },
+    ] = await Promise.all([
+      (supabase as any)
+        .from('project_slides')
+        .select('*')
+        .eq('project_id', projectId)
+        .order('slide_index', { ascending: true }),
+      (supabase as any)
+        .from('brand_profiles')
+        .select('*')
+        .eq('client_id', clientId)
+        .eq('status', 'approved')
+        .maybeSingle(),
+      (supabase as any)
+        .from('client_assets')
+        .select('*')
+        .eq('client_id', clientId)
+        .in('asset_type', ['logo_primary', 'logo_secondary', 'logo_monochrome', 'font', 'icon'])
+        .order('created_at', { ascending: false }),
+      (supabase as any)
+        .from('brand_references')
+        .select('*, asset:client_assets(storage_path)')
+        .eq('client_id', clientId)
+        .eq('is_approved', true)
+        .limit(12),
+      (supabase as any)
+        .from('project_creative_plans')
+        .select('*')
+        .eq('project_id', projectId)
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      (supabase as any)
+        .from('client_pieces')
+        .select('*')
+        .eq('client_id', clientId)
+        .order('created_at', { ascending: false }),
+    ]);
 
-    // 3. Fetch Compositions for all slides
+    // 3. Processa URLs seguras para Brand Assets (Logos / Fontes)
+    const mappedBrandAssets = await Promise.all(
+      (brandAssets || []).map(async (asset: any) => {
+        let signedUrl: string | null = null;
+        try {
+          signedUrl = await StorageService.createSignedUrl(
+            asset.storage_bucket || 'client-brand-assets',
+            asset.storage_path,
+            7200
+          );
+        } catch {
+          // fallback silencioso para proxy raw
+        }
+        const rawUrl = `/api/assets/raw?path=${encodeURIComponent(asset.storage_path)}`;
+        return {
+          ...asset,
+          signed_url: signedUrl,
+          raw_url: rawUrl,
+          url: signedUrl || rawUrl,
+        };
+      })
+    );
+
+    // 4. Processa Referências (client_pieces + brand_references)
+    const mappedPieces = await Promise.all(
+      (clientPieces || []).map(async (piece: any) => {
+        let imageUrl = '';
+        try {
+          imageUrl =
+            (await StorageService.createSignedUrl(
+              piece.storage_bucket || 'client-pieces',
+              piece.storage_path,
+              7200
+            )) || `/api/assets/raw?path=${encodeURIComponent(piece.storage_path)}`;
+        } catch {
+          imageUrl = `/api/assets/raw?path=${encodeURIComponent(piece.storage_path)}`;
+        }
+        return {
+          id: piece.id,
+          organization_id: piece.organization_id,
+          client_id: piece.client_id,
+          title: piece.title || piece.original_filename || 'Peça de Referência',
+          description: piece.notes || piece.original_filename || null,
+          reference_type: piece.piece_type || piece.format_type || 'client_piece',
+          tags: [piece.format_type, piece.piece_type].filter(Boolean),
+          image_url: imageUrl,
+          ai_description: (piece.analysis_json as any)?.description || null,
+          visual_features: piece.analysis_json || {},
+          created_at: piece.created_at,
+        };
+      })
+    );
+
+    const mappedLegacyRefs = (references || []).map((ref: any) => ({
+      ...ref,
+      image_url:
+        ref.image_url ||
+        (ref.asset?.storage_path ? `/api/assets/raw?path=${encodeURIComponent(ref.asset.storage_path)}` : ''),
+    }));
+
+    const pieceIds = new Set(mappedPieces.map((p) => p.id));
+    const allReferences = [...mappedPieces, ...mappedLegacyRefs.filter((lr: any) => !pieceIds.has(lr.id))];
+
+    // 5. Enriquece slides com os dados da referência selecionada
+    const enrichedSlides = (slides || []).map((s: any) => {
+      const meta = (s.metadata as any) || {};
+      const refId = s.base_asset_id || meta.referencePieceId || meta.primaryReferencePieceId;
+      const matchedRef = allReferences.find((r) => r.id === refId);
+      return {
+        ...s,
+        reference_piece_id: refId || null,
+        reference_image_url: matchedRef?.image_url || meta.referenceImageUrl || null,
+        reference_title: matchedRef?.title || meta.referenceTitle || null,
+      };
+    });
+
+    // 6. Fetch Compositions for slides (if any)
     const slideIds = (slides || []).map((s: any) => s.id);
-    const { data: compositions } = await supabase
-      .from('slide_compositions')
-      .select('*')
-      .in('slide_id', slideIds);
-
-    // 4. Fetch Client Brand Profile
-    const { data: brandProfile } = await supabase
-      .from('brand_profiles')
-      .select('*')
-      .eq('client_id', clientId)
-      .eq('status', 'approved')
-      .maybeSingle();
-
-    // 5. Fetch Client Logos & Assets
-    const { data: brandAssets } = await supabase
-      .from('client_assets')
-      .select('*')
-      .eq('client_id', clientId)
-      .in('asset_type', ['logo_primary', 'logo_secondary', 'logo_monochrome', 'font', 'icon'])
-      .order('created_at', { ascending: false });
-
-    // 6. Fetch Client Brand References
-    const { data: references } = await supabase
-      .from('brand_references')
-      .select('*, asset:client_assets(storage_path)')
-      .eq('client_id', clientId)
-      .eq('is_approved', true)
-      .limit(12);
-
-    // 7. Fetch Creative Plan
-    const { data: creativePlan } = await supabase
-      .from('project_creative_plans')
-      .select('*')
-      .eq('project_id', projectId)
-      .order('version', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    let compositions: any[] = [];
+    if (slideIds.length > 0) {
+      const { data: comps } = await (supabase as any)
+        .from('slide_compositions')
+        .select('*')
+        .in('slide_id', slideIds);
+      compositions = comps || [];
+    }
 
     return NextResponse.json({
       project,
-      slides: slides || [],
+      slides: enrichedSlides,
       compositions: compositions || [],
       brandProfile,
-      brandAssets: brandAssets || [],
-      references: references || [],
+      brandAssets: mappedBrandAssets,
+      references: allReferences,
       creativePlan,
     });
   } catch (err: any) {
@@ -116,6 +203,13 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
       if (body.title) allowedUpdates.title = body.title;
       if (body.status) allowedUpdates.status = body.status;
       if (body.brief !== undefined) allowedUpdates.brief = body.brief;
+      if (body.archived === true) {
+        allowedUpdates.archived_at = new Date().toISOString();
+        allowedUpdates.status = 'archived';
+      } else if (body.archived === false) {
+        allowedUpdates.archived_at = null;
+        allowedUpdates.status = 'draft';
+      }
       const devUpdated = devStore.updateProject(projectId, allowedUpdates);
       return NextResponse.json({ project: devUpdated });
     }
@@ -144,6 +238,13 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
       }
     }
     if (body.brief !== undefined) allowedUpdates.brief = body.brief;
+    if (body.archived === true) {
+      allowedUpdates.archived_at = new Date().toISOString();
+      allowedUpdates.status = 'archived';
+    } else if (body.archived === false) {
+      allowedUpdates.archived_at = null;
+      allowedUpdates.status = 'draft';
+    }
 
     const { data: updated, error: updErr } = await (supabase as any)
       .from('projects')

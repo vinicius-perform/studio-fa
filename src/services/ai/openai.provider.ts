@@ -26,12 +26,12 @@ export class OpenAIProvider implements AIProvider {
       const env = getServerEnv();
       this.apiKey = env.OPENAI_API_KEY;
       this.visionModel = env.OPENAI_VISION_MODEL || 'gpt-4o';
-      this.imageModel = env.OPENAI_IMAGE_MODEL || 'dall-e-3';
+      this.imageModel = env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
       this.embeddingModel = env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
     } catch {
       this.apiKey = process.env.OPENAI_API_KEY;
       this.visionModel = process.env.OPENAI_VISION_MODEL || 'gpt-4o';
-      this.imageModel = process.env.OPENAI_IMAGE_MODEL || 'dall-e-3';
+      this.imageModel = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare';
       this.embeddingModel = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
     }
   }
@@ -212,81 +212,78 @@ export class OpenAIProvider implements AIProvider {
     });
 
     const apiKey = this.getApiKey();
-    if (apiKey) {
-      try {
-        const isPortrait = params.dimensions.height > params.dimensions.width;
-        const isSquare = params.dimensions.width === params.dimensions.height;
-        const dalleSize = isSquare ? '1024x1024' : isPortrait ? '1024x1792' : '1792x1024';
-
-        const response = await fetch('https://api.openai.com/v1/images/generations', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: 'dall-e-3',
-            prompt: params.prompt,
-            n: 1,
-            size: dalleSize,
-            quality: 'standard',
-            response_format: 'url',
-          }),
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          const imgUrl = data.data?.[0]?.url;
-          if (imgUrl) {
-            return {
-              imageUrl: imgUrl,
-              model: 'dall-e-3',
-              costUsd: 0.04,
-            };
-          }
-        } else {
-          const errData = await response.json().catch(() => ({}));
-          Logger.error({ operation: 'openai_image_api', result: 'error', metadata: errData });
-          throw new Error(errData?.error?.message || `Erro da API OpenAI (${response.status})`);
-        }
-      } catch (err: any) {
-        Logger.error({ operation: 'openai_image_call', result: 'error' }, err);
-        throw err;
+    if (!apiKey) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new AppError('AI_ERROR', 500, 'Chave da API OpenAI não configurada para gerar imagens em produção.');
       }
+
+      // Fallback estritamente permitido para suíte de testes legados (ai-provider.test.ts e async-queue.test.ts)
+      const primaryBg = params.brandProfile.colors?.primary?.[0] || '#0F141F';
+      const accent = params.brandProfile.colors?.accent?.[0] || '#CEF52A';
+      const w = params.dimensions.width;
+      const h = params.dimensions.height;
+
+      const svg = `
+        <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="grad" cx="80%" cy="30%" r="70%">
+              <stop offset="0%" stop-color="#1F2937" stop-opacity="0.85" />
+              <stop offset="60%" stop-color="${primaryBg}" stop-opacity="1" />
+              <stop offset="100%" stop-color="#07090E" stop-opacity="1" />
+            </radialGradient>
+          </defs>
+          <rect width="${w}" height="${h}" fill="url(#grad)" />
+        </svg>
+      `.trim();
+
+      return {
+        imageUrl: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
+        model: `${this.imageModel} (Test Fallback)`,
+        costUsd: 0.0,
+      };
     }
 
-    // High quality deterministic mock visual background for development/tests without API cost
-    const primaryBg = params.brandProfile.colors?.primary?.[0] || '#0F141F';
-    const accent = params.brandProfile.colors?.accent?.[0] || '#CEF52A';
-    const w = params.dimensions.width;
-    const h = params.dimensions.height;
+    try {
+      const size = `${params.dimensions.width}x${params.dimensions.height}`;
 
-    const svg = `
-      <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <radialGradient id="grad" cx="80%" cy="30%" r="70%">
-            <stop offset="0%" stop-color="#1F2937" stop-opacity="0.85" />
-            <stop offset="60%" stop-color="${primaryBg}" stop-opacity="1" />
-            <stop offset="100%" stop-color="#07090E" stop-opacity="1" />
-          </radialGradient>
-          <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="${accent}" stop-opacity="0.6" />
-            <stop offset="100%" stop-color="${accent}" stop-opacity="0" />
-          </linearGradient>
-        </defs>
-        <rect width="${w}" height="${h}" fill="url(#grad)" />
-        <circle cx="${Math.round(w * 0.75)}" cy="${Math.round(h * 0.4)}" r="${Math.round(w * 0.35)}" fill="${primaryBg}" fill-opacity="0.4" />
-        <path d="M 0,${Math.round(h * 0.85)} Q ${Math.round(w * 0.5)},${Math.round(h * 0.7)} ${w},${Math.round(h * 0.9)}" stroke="url(#lineGrad)" stroke-width="3" fill="none" opacity="0.4" />
-      </svg>
-    `.trim();
+      const response = await fetch('https://api.openai.com/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.imageModel,
+          prompt: params.prompt,
+          n: 1,
+          size,
+          quality: 'low',
+        }),
+      });
 
-    const mockImageUrl = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        Logger.error({ operation: 'openai_image_api', result: 'error', metadata: errData });
+        throw new Error(errData?.error?.message || `Erro da API OpenAI (${response.status})`);
+      }
 
-    return {
-      imageUrl: mockImageUrl,
-      model: `${this.imageModel} (Studio FA Visual Engine)`,
-      costUsd: 0.0,
-    };
+      const data = await response.json();
+      const item = data.data?.[0];
+      const imgUrl = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : item?.url;
+
+      if (!imgUrl) {
+        throw new Error('Nenhuma imagem retornada pela OpenAI.');
+      }
+
+      return {
+        imageUrl: imgUrl,
+        model: this.imageModel,
+        costUsd: 0.02,
+      };
+    } catch (err: any) {
+      Logger.error({ operation: 'openai_image_call', result: 'error' }, err);
+      throw err;
+    }
   }
 
   async editImage(params: EditImageInput): Promise<GenerateImageOutput> {

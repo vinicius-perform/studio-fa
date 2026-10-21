@@ -17,6 +17,7 @@ export interface BaseLayer {
   visible?: boolean;
   locked?: boolean;
   zIndex: number;
+  lockAspectRatio?: boolean;
 }
 
 export interface ImageLayer extends BaseLayer {
@@ -35,12 +36,26 @@ export interface ImageLayer extends BaseLayer {
   }[];
 }
 
+export type FontWeight =
+  | '100'
+  | '200'
+  | '300'
+  | '400'
+  | '500'
+  | '600'
+  | '700'
+  | '800'
+  | '900'
+  | 'normal'
+  | 'bold'
+  | number;
+
 export interface TextLayer extends BaseLayer {
   type: 'text';
   text: string;
   fontFamily: string;
   fontSize: number;
-  fontWeight?: 'normal' | 'bold' | '600' | '700' | '800' | '900' | number;
+  fontWeight?: FontWeight;
   fontStyle?: 'normal' | 'italic';
   lineHeight?: number; // multiplier, e.g. 1.2
   letterSpacing?: number; // px

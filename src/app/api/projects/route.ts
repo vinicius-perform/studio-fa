@@ -1,8 +1,10 @@
-// src/app/api/projects/route.ts
 import { NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { ProjectService } from '@/services/projects/project.service';
 import { CompositionService } from '@/services/compositions/composition.service';
+import { CreativeContextService } from '@/services/ai/creative-context.service';
+import { ImageGenerationService } from '@/services/ai/image-generation.service';
+import { StorageService } from '@/services/storage/storage.service';
 import { getFormatDefinition } from '@/config/formats';
 import { formatError } from '@/lib/errors';
 import { devStore } from '@/lib/dev-store';
@@ -16,7 +18,7 @@ import {
   ForbiddenError,
   NotFoundError,
 } from '@/lib/auth/server-guards';
-import { isAdmin } from '@/lib/auth/permissions';
+import { isAdmin, canCreateProjects } from '@/lib/auth/permissions';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -24,10 +26,16 @@ export async function GET(req: Request) {
   const status = searchParams.get('status');
   const format = searchParams.get('format');
   const search = searchParams.get('search');
+  const archived = searchParams.get('archived');
 
   try {
     if (isDevStoreAllowed()) {
-      const localProjects = devStore.listProjects(clientId || undefined, status || undefined);
+      const localProjects = devStore.listProjects(
+        clientId || undefined,
+        status || undefined,
+        format || undefined,
+        archived === 'true'
+      );
       return NextResponse.json({ projects: localProjects });
     }
 
@@ -41,10 +49,18 @@ export async function GET(req: Request) {
 
     let query = supabase
       .from('projects')
-      .select('*, client:clients(name, slug, brand_status), slides:project_slides(id, slide_index, status)')
+      .select('*, client:clients(name, slug, brand_status), slides:project_slides(id, slide_index, status, base_asset_id)')
       .eq('organization_id', session.organizationId)
-      .is('archived_at', null)
       .order('updated_at', { ascending: false });
+
+    if (archived === 'true' || status === 'archived') {
+      query = query.not('archived_at', 'is', null);
+    } else {
+      query = query.is('archived_at', null);
+      if (status && status !== 'all') {
+        query = query.eq('status', status as any);
+      }
+    }
 
     // Designers e Viewers enxergam apenas projetos de clientes atribuídos
     if (!isAdmin(session.role)) {
@@ -55,7 +71,6 @@ export async function GET(req: Request) {
     }
 
     if (clientId) query = query.eq('client_id', clientId);
-    if (status) query = query.eq('status', status as any);
     if (format) query = query.eq('format', format as any);
     if (search) query = query.ilike('title', `%${search}%`);
 
@@ -68,7 +83,50 @@ export async function GET(req: Request) {
       );
     }
 
-    return NextResponse.json({ projects: projects || [] });
+    const projectsList = (projects || []) as any[];
+    // Batch fetch slide 0 compositions to extract thumbnails without N+1
+    if (projectsList.length > 0) {
+      const slide0Ids: string[] = [];
+      const slideIdToProjectMap = new Map<string, any>();
+
+      for (const p of projectsList) {
+        const sortedSlides = (p.slides || []).sort((a: any, b: any) => a.slide_index - b.slide_index);
+        if (sortedSlides.length > 0) {
+          slide0Ids.push(sortedSlides[0].id);
+          slideIdToProjectMap.set(sortedSlides[0].id, p);
+        }
+      }
+
+      if (slide0Ids.length > 0) {
+        const { data: comps } = await (supabase as any)
+          .from('slide_compositions')
+          .select('slide_id, document')
+          .in('slide_id', slide0Ids);
+
+        if (comps) {
+          for (const c of comps as any[]) {
+            const p = slideIdToProjectMap.get(c.slide_id);
+            if (p && (c as any).document?.layers) {
+              const bgLayer = (c as any).document.layers.find(
+                (l: any) => l.type === 'background' || l.type === 'image'
+              );
+              if (bgLayer?.imageUrl) {
+                p.thumbnail_url = bgLayer.imageUrl;
+              }
+            }
+          }
+        }
+      }
+
+      // Fallback para metadados salvos pelo Chat Criativo caso não haja composição ainda
+      for (const p of projectsList) {
+        if (!p.thumbnail_url && p.metadata?.thumbnail_url) {
+          p.thumbnail_url = p.metadata.thumbnail_url;
+        }
+      }
+    }
+
+    return NextResponse.json({ projects: projectsList });
   } catch (err: any) {
     if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
     if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
@@ -87,6 +145,8 @@ export async function POST(req: Request) {
       format,
       slides,
       globalCreativeDirective,
+      width,
+      height,
     } = body;
 
     if (!clientId) {
@@ -96,7 +156,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const formatDef = getFormatDefinition(format || 'instagram_feed_4_5');
+    const formatDef = getFormatDefinition(format || 'instagram_feed_4_5', width, height);
     const aiProvider = new OpenAIProvider();
     const compositionService = new CompositionService({} as any);
 
@@ -233,9 +293,9 @@ export async function POST(req: Request) {
     const supabase = getSupabaseServerClient();
     const session = await requireSessionContext(supabase);
 
-    if (session.role === 'viewer') {
+    if (!canCreateProjects(session.role)) {
       return NextResponse.json(
-        { error: { message: 'Visualizadores não possuem permissão para criar produções.' } },
+        { error: { message: 'Visualizadores possuem acesso somente leitura e não podem criar produções.' } },
         { status: 403 }
       );
     }
@@ -244,6 +304,8 @@ export async function POST(req: Request) {
 
     const projectService = new ProjectService(supabase);
     const serverCompService = new CompositionService(supabase);
+    const contextService = new CreativeContextService(supabase);
+    const imageGenService = new ImageGenerationService(supabase);
 
     const project = await projectService.create(
       {
@@ -272,12 +334,22 @@ export async function POST(req: Request) {
 
     const { data: logoAsset } = await supabase
       .from('client_assets')
-      .select('storage_path')
+      .select('storage_path, storage_bucket')
       .eq('client_id', clientId)
       .in('asset_type', ['logo_primary', 'logo_monochrome'])
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    const logoData = logoAsset as any;
+    let clientLogoSignedUrl: string | undefined = undefined;
+    if (logoData?.storage_path) {
+      clientLogoSignedUrl = (await StorageService.createSignedUrl(
+        logoData.storage_bucket || 'client-brand-assets',
+        logoData.storage_path,
+        7200
+      )) || undefined;
+    }
 
     const createdSlides = [];
     const slidesData =
@@ -285,6 +357,49 @@ export async function POST(req: Request) {
 
     for (let i = 0; i < slidesData.length; i++) {
       const s = slidesData[i];
+
+      // Suporte a upload externo de referência na tela /create
+      let refPieceId = s.referencePieceId;
+      if (s.referenceType === 'external_upload' && s.referenceImageUrl && !refPieceId) {
+        try {
+          const uploadResult = await StorageService.uploadBase64({
+            bucket: 'client-pieces',
+            organizationId: session.organizationId,
+            clientId,
+            folder: 'pieces',
+            originalFilename: s.referenceTitle || 'upload-referencia.png',
+            base64Data: s.referenceImageUrl,
+          });
+
+          const { data: newPiece } = await (supabase as any)
+            .from('client_pieces')
+            .insert({
+              organization_id: session.organizationId,
+              client_id: clientId,
+              title: s.referenceTitle || 'Referência Externa',
+              original_filename: s.referenceTitle || 'upload-referencia.png',
+              storage_bucket: uploadResult.storageBucket,
+              storage_path: uploadResult.storagePath,
+              file_size_bytes: uploadResult.fileSizeBytes,
+              mime_type: uploadResult.mimeType,
+              format_type: 'custom',
+              piece_type: 'external_reference',
+              analysis_status: 'pending',
+              created_by: session.userId,
+            })
+            .select()
+            .single();
+
+          if (newPiece) {
+            refPieceId = newPiece.id;
+          }
+        } catch (extUploadErr: any) {
+          console.warn('[POST /api/projects] Erro ao salvar referência externa enviada:', extUploadErr?.message);
+        }
+      }
+
+      const finalRefId = refPieceId || s.referencePieceId || s.baseAssetId || null;
+
       const slideRow = await projectService.addSlide({
         organization_id: session.organizationId,
         project_id: project.id,
@@ -295,17 +410,49 @@ export async function POST(req: Request) {
         body: s.body || null,
         cta: s.cta || null,
         instructions: s.instructions || null,
-        base_asset_id: s.baseAssetId || null,
+        base_asset_id: null,
         status: 'draft',
+        metadata: {
+          referencePieceId: finalRefId,
+          primaryReferencePieceId: s.primaryReferencePieceId || finalRefId,
+          referenceType: s.referenceType || (finalRefId ? 'client_piece' : null),
+          referenceImageUrl: s.referenceImageUrl || null,
+          referenceTitle: s.referenceTitle || null,
+        },
       });
 
-      const generatedBg = await generateSlideBackground(
-        formatDef,
-        brandProfile,
-        s,
-        i,
-        slidesData.length
-      );
+      let generatedBg: string | undefined = s.backgroundUrl || undefined;
+      let generatedAssetId: string | undefined = undefined;
+
+      try {
+        const creativeContext = await contextService.buildContext({
+          organizationId: session.organizationId,
+          clientId,
+          projectId: project.id,
+          slideIndex: i,
+          formatId: format || 'instagram_feed_4_5',
+          content: {
+            title: s.title || undefined,
+            subtitle: s.subtitle || undefined,
+            body: s.body || undefined,
+            cta: s.cta || undefined,
+            userVisualDirection: s.instructions || globalCreativeDirective || undefined,
+          },
+          selectedReferenceIds: s.referenceIds || (refPieceId ? [refPieceId] : []),
+          primaryReferenceId: s.primaryReferencePieceId || refPieceId || undefined,
+        });
+
+        const generatedAsset = await imageGenService.generateSlideVisual({
+          context: creativeContext,
+          slideId: slideRow.id,
+          projectId: project.id,
+          profile: body.profile || 'FINAL',
+        });
+        generatedBg = generatedAsset.publicOrSignedUrl;
+        generatedAssetId = generatedAsset.id;
+      } catch (err: any) {
+        console.warn(`[Slide ${i + 1}] Geração visual:`, err?.message);
+      }
 
       const defaultDoc = await serverCompService.initializeDefaultDocument({
         format: formatDef,
@@ -316,8 +463,13 @@ export async function POST(req: Request) {
           body: s.body,
           cta: s.cta,
         },
-        clientLogoUrl: (logoAsset as any)?.storage_path || undefined,
-        backgroundUrl: generatedBg || s.backgroundUrl,
+        clientLogoUrl:
+          clientLogoSignedUrl ||
+          ((logoAsset as any)?.storage_path
+            ? `/api/assets/raw?path=${encodeURIComponent((logoAsset as any).storage_path)}`
+            : undefined),
+        backgroundUrl: generatedBg,
+        backgroundAssetId: generatedAssetId,
       });
 
       await serverCompService.saveComposition({
@@ -334,6 +486,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ project, slides: createdSlides }, { status: 201 });
   } catch (err: any) {
+    const safeMsg = err instanceof Error ? (err.stack || err.message) : String(err);
+    console.error('[POST /api/projects] Erro inesperado ao criar projeto:', safeMsg);
     if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
     if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
     if (err instanceof NotFoundError) return NextResponse.json({ error: { message: err.message } }, { status: 404 });

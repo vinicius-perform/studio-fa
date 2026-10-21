@@ -15,6 +15,7 @@ export async function middleware(request: NextRequest) {
   if (
     pathname.startsWith('/_next') ||
     pathname.startsWith('/favicon.ico') ||
+    pathname.startsWith('/api/assets/raw') ||
     pathname.includes('.')
   ) {
     return response;
@@ -117,34 +118,17 @@ export async function middleware(request: NextRequest) {
     role = null;
   }
 
-  // Se está autenticado e tenta acessar /login, redireciona para a home de acordo com a role
-  if (pathname === '/login') {
-    if (role === 'designer') {
-      return NextResponse.redirect(new URL('/create', request.url));
-    }
-    if (role === 'viewer') {
-      return NextResponse.redirect(new URL('/projects', request.url));
-    }
-    return NextResponse.redirect(new URL('/', request.url));
+  // Se está autenticado e tenta acessar /login ou /, redireciona para /home
+  if (pathname === '/login' || pathname === '/') {
+    return NextResponse.redirect(new URL('/home', request.url));
   }
 
   // Se não for rota de API, aplica as regras de guarda por Role nas telas
   if (!pathname.startsWith('/api/')) {
-    // Rota / (Painel Operacional) é somente para Admin e Owner
-    if (pathname === '/') {
-      if (role === 'designer') {
-        return NextResponse.redirect(new URL('/create', request.url));
-      }
-      if (role === 'viewer') {
-        return NextResponse.redirect(new URL('/projects', request.url));
-      }
-    }
-
     // Rotas administrativas: /users e /settings
     const isAdminRoute = pathname.startsWith('/users') || pathname.startsWith('/settings');
     if (isAdminRoute && role !== 'owner' && role !== 'admin') {
-      const destination = role === 'designer' ? '/create' : '/projects';
-      return NextResponse.redirect(new URL(destination, request.url));
+      return NextResponse.redirect(new URL('/home', request.url));
     }
 
     // Rota de criação (/create): Viewer não pode acessar

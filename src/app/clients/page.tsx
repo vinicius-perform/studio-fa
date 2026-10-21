@@ -610,6 +610,8 @@ export default function ClientsPage() {
                               <img
                                 src={client.logoAsset.storage_path}
                                 alt={client.name}
+                                loading="lazy"
+                                decoding="async"
                                 className="w-full h-full object-contain p-1"
                               />
                             ) : (

@@ -4,6 +4,17 @@ import type { Database } from '@/types/database';
 import { encryptSecret, decryptSecret, maskSecret } from '@/lib/crypto';
 import { getServerEnv } from '@/config/env';
 
+export const SUPPORTED_IMAGE_MODELS = [
+  'gpt-image-2.5-flare',
+  'gpt-image-2.5-sunburst',
+] as const;
+
+export type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
+
+export const LEGACY_IMAGE_MODELS = ['dall-e-3', 'dall-e-2', 'dall-e'] as const;
+
+export const DEFAULT_IMAGE_MODEL: SupportedImageModel = 'gpt-image-2.5-sunburst';
+
 export interface IntegrationPublicInfo {
   provider: string;
   configured: boolean;
@@ -68,7 +79,7 @@ export class IntegrationService {
         settings: {
           textModel: process.env.OPENAI_VISION_MODEL || 'gpt-4o',
           visionModel: process.env.OPENAI_VISION_MODEL || 'gpt-4o',
-          imageModel: process.env.OPENAI_IMAGE_MODEL || 'dall-e-3',
+          imageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare',
         },
       };
     }
@@ -256,16 +267,57 @@ export class IntegrationService {
     if (modelType === 'text' && settings.textModel && typeof settings.textModel === 'string' && settings.textModel.trim()) {
       return settings.textModel.trim();
     }
-    if (modelType === 'image' && settings.imageModel && typeof settings.imageModel === 'string' && settings.imageModel.trim()) {
-      return settings.imageModel.trim();
+
+    if (modelType === 'image') {
+      const rawModel = typeof settings.imageModel === 'string' ? settings.imageModel.trim() : '';
+
+      if (rawModel) {
+        // 1. Intercepta modelo legado conhecido
+        if (LEGACY_IMAGE_MODELS.includes(rawModel as any)) {
+          console.warn(
+            `[IntegrationService] Modelo legado detectado: "${rawModel}". Migrando automaticamente para ${DEFAULT_IMAGE_MODEL}.`
+          );
+          // Migração assíncrona segura no banco para auto-reparo
+          this.saveSettings(organizationId, 'openai', { ...settings, imageModel: DEFAULT_IMAGE_MODEL }).catch((err) => {
+            console.error('[IntegrationService] Falha ao persistir auto-migração de modelo no banco:', err?.message);
+          });
+          return DEFAULT_IMAGE_MODEL;
+        }
+
+        // 2. Modelo suportado oficial
+        if (SUPPORTED_IMAGE_MODELS.includes(rawModel as any)) {
+          return rawModel;
+        }
+
+        // 3. Modelo desconhecido não homologado -> erro administrativo claro
+        throw new Error(
+          `[IntegrationService] Modelo de imagem não suportado: "${rawModel}". Modelos válidos: ${SUPPORTED_IMAGE_MODELS.join(', ')}.`
+        );
+      }
+
+      // 4. Fallback de variáveis server-side
+      const envModel = process.env.OPENAI_IMAGE_MODEL?.trim();
+      if (envModel) {
+        if (LEGACY_IMAGE_MODELS.includes(envModel as any)) {
+          console.warn(
+            `[IntegrationService] OPENAI_IMAGE_MODEL de ambiente possui modelo legado "${envModel}". Usando fallback seguro: ${DEFAULT_IMAGE_MODEL}.`
+          );
+          return DEFAULT_IMAGE_MODEL;
+        }
+        if (SUPPORTED_IMAGE_MODELS.includes(envModel as any)) {
+          return envModel;
+        }
+        throw new Error(
+          `[IntegrationService] OPENAI_IMAGE_MODEL de ambiente inválido: "${envModel}". Modelos válidos: ${SUPPORTED_IMAGE_MODELS.join(', ')}.`
+        );
+      }
+
+      return DEFAULT_IMAGE_MODEL;
     }
 
-    // Fallback de variáveis server-side
+    // Fallback de variáveis server-side para vision / text
     if (modelType === 'vision' || modelType === 'text') {
       return process.env.OPENAI_VISION_MODEL?.trim() || 'gpt-4o';
-    }
-    if (modelType === 'image') {
-      return process.env.OPENAI_IMAGE_MODEL?.trim() || 'dall-e-3';
     }
 
     return 'gpt-4o';

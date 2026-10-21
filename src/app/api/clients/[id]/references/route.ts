@@ -12,6 +12,8 @@ import { formatError } from '@/lib/errors';
 import { devStore } from '@/lib/dev-store';
 import { isDevStoreAllowed } from '@/config/env';
 
+import { StorageService } from '@/services/storage/storage.service';
+
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
     const clientId = params.id;
@@ -27,22 +29,82 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     // Valida que o usuário tem acesso a este cliente
     await requireClientAccess(supabase, session, clientId);
 
-    const { data: references, error } = await supabase
+    // 1. Busca peças de client_pieces (padrão oficial de referências)
+    const { data: pieces, error: piecesErr } = await supabase
+      .from('client_pieces')
+      .select('*')
+      .eq('client_id', clientId)
+      .eq('organization_id', session.organizationId)
+      .order('created_at', { ascending: false });
+
+    if (piecesErr) {
+      console.warn('Erro ao buscar client_pieces:', piecesErr);
+    }
+
+    // 2. Busca referências legadas de brand_references
+    const { data: legacyRefs, error: legacyErr } = await supabase
       .from('brand_references')
       .select('*')
       .eq('client_id', clientId)
       .eq('organization_id', session.organizationId)
       .order('created_at', { ascending: false });
 
-    if (error) {
-      console.error('Erro ao buscar brand_references:', error);
-      return NextResponse.json(
-        { error: { message: 'Não foi possível conectar ao Studio FA. Tente novamente.' } },
-        { status: 503 }
-      );
+    if (legacyErr) {
+      console.warn('Erro ao buscar brand_references:', legacyErr);
     }
 
-    return NextResponse.json({ references: references || [] });
+    const mappedPieces = await Promise.all(
+      (pieces || []).map(async (piece: any) => {
+        let imageUrl = '';
+        try {
+          const signed = await StorageService.createSignedUrl(
+            piece.storage_bucket || 'client-pieces',
+            piece.storage_path,
+            7200
+          );
+          if (signed) imageUrl = signed;
+        } catch (e: any) {
+          console.warn(`[references] Falha ao assinar URL da peça ${piece.id}:`, e?.message);
+        }
+
+        const tags: string[] = [];
+        if (piece.format_type) tags.push(piece.format_type);
+        if (piece.piece_type) tags.push(piece.piece_type);
+
+        return {
+          id: piece.id,
+          organization_id: piece.organization_id,
+          client_id: piece.client_id,
+          title: piece.title || piece.original_filename || 'Peça de Referência',
+          description: piece.notes || piece.original_filename || null,
+          reference_type: piece.piece_type || piece.format_type || 'client_piece',
+          tags,
+          image_url: imageUrl,
+          ai_description: (piece.analysis_json as any)?.description || null,
+          visual_features: piece.analysis_json || {},
+          created_at: piece.created_at,
+        };
+      })
+    );
+
+    const mappedLegacy = (legacyRefs || []).map((ref: any) => ({
+      id: ref.id,
+      organization_id: ref.organization_id,
+      client_id: ref.client_id,
+      title: ref.title,
+      description: ref.description || null,
+      reference_type: ref.reference_type || 'instagram_post',
+      tags: ref.tags || [],
+      image_url: ref.image_url,
+      ai_description: ref.ai_description || null,
+      visual_features: ref.visual_features || {},
+      created_at: ref.created_at,
+    }));
+
+    const pieceIds = new Set(mappedPieces.map((p) => p.id));
+    const combined = [...mappedPieces, ...mappedLegacy.filter((lr) => !pieceIds.has(lr.id))];
+
+    return NextResponse.json({ references: combined });
   } catch (err: any) {
     if (err instanceof AuthError) return NextResponse.json({ error: { message: err.message } }, { status: 401 });
     if (err instanceof ForbiddenError) return NextResponse.json({ error: { message: err.message } }, { status: 403 });
@@ -146,14 +208,25 @@ export async function DELETE(req: Request, { params }: { params: { id: string } 
 
     await requireClientAccess(supabase, session, clientId);
 
-    const { error: delErr } = await supabase
+    // Exclui de client_pieces se existir
+    const { error: delPieceErr } = await supabase
+      .from('client_pieces')
+      .delete()
+      .eq('id', referenceId)
+      .eq('client_id', clientId)
+      .eq('organization_id', session.organizationId);
+
+    // Exclui de brand_references se existir
+    const { error: delLegacyErr } = await supabase
       .from('brand_references')
       .delete()
       .eq('id', referenceId)
       .eq('client_id', clientId)
       .eq('organization_id', session.organizationId);
 
-    if (delErr) throw delErr;
+    if (delPieceErr && delLegacyErr) {
+      console.warn('Erro ao deletar referência:', delPieceErr, delLegacyErr);
+    }
 
     return NextResponse.json({ success: true });
   } catch (err: any) {

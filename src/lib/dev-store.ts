@@ -84,6 +84,9 @@ export interface DevStoreData {
   projects: any[];
   slides: any[];
   compositions: any[];
+  creativeConversations?: any[];
+  creativeMessages?: any[];
+  creativeAttachments?: any[];
   jobs?: any[];
   settings?: Record<string, any>;
   deletedClientIds?: string[];
@@ -138,6 +141,9 @@ const INITIAL_DATA: DevStoreData = {
   projects: [],
   slides: [],
   compositions: [],
+  creativeConversations: [],
+  creativeMessages: [],
+  creativeAttachments: [],
 };
 
 const DATA_FILE_PATH = path.join(process.cwd(), '.dev-store-data.json');
@@ -366,21 +372,110 @@ class DevDataStore {
     return removed;
   }
 
-  listProjects(clientId?: string, status?: string) {
+  listProjects(clientId?: string, status?: string, format?: string, archived?: boolean) {
     const data = this.load();
     let res = data.projects;
     if (clientId) res = res.filter((p) => p.client_id === clientId);
-    if (status && status !== 'all') res = res.filter((p) => p.status === status);
+    if (format) res = res.filter((p) => p.format === format);
+
+    if (status === 'archived' || archived) {
+      res = res.filter((p) => p.status === 'archived' || p.archived_at !== null);
+    } else {
+      res = res.filter((p) => p.status !== 'archived' && !p.archived_at);
+      if (status && status !== 'all') {
+        res = res.filter((p) => p.status === status);
+      }
+    }
 
     return res.map((p) => {
       const client = data.clients.find((c) => c.id === p.client_id);
-      const slides = data.slides.filter((s) => s.project_id === p.id);
+      const slides = data.slides
+        .filter((s) => s.project_id === p.id)
+        .sort((a, b) => a.slide_index - b.slide_index);
+
+      // Compute thumbnail_url from first slide composition or asset
+      let thumbnailUrl: string | null = null;
+      if (slides.length > 0) {
+        const firstSlide = slides[0];
+        const comp = data.compositions.find((c) => c.slide_id === firstSlide.id);
+        if (comp?.document?.layers) {
+          const bgLayer = comp.document.layers.find(
+            (l: any) => l.type === 'background' || l.type === 'image'
+          ) as any;
+          if (bgLayer?.imageUrl) {
+            thumbnailUrl = bgLayer.imageUrl;
+          }
+        }
+      }
+
       return {
         ...p,
         client: client ? { name: client.name, slug: client.slug, brand_status: client.brand_status } : null,
         slides,
+        thumbnail_url: thumbnailUrl,
       };
     });
+  }
+
+  duplicateProject(id: string) {
+    const data = this.load();
+    const original = data.projects.find((p) => p.id === id);
+    if (!original) return null;
+
+    const newProjectId = `proj-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const clonedProject = {
+      ...original,
+      id: newProjectId,
+      title: `${original.title} — Cópia`,
+      status: 'draft',
+      archived_at: null,
+      approved_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const originalSlides = data.slides
+      .filter((s) => s.project_id === id)
+      .sort((a, b) => a.slide_index - b.slide_index);
+
+    const clonedSlides: any[] = [];
+    const clonedComps: any[] = [];
+
+    for (const slide of originalSlides) {
+      const newSlideId = `slide-${Date.now()}-${slide.slide_index}-${Math.random().toString(36).substring(2, 7)}`;
+      const originalComp = data.compositions.find((c) => c.slide_id === slide.id);
+
+      clonedSlides.push({
+        ...slide,
+        id: newSlideId,
+        project_id: newProjectId,
+        status: 'draft',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      if (originalComp) {
+        clonedComps.push({
+          id: `comp-${Date.now()}-${slide.slide_index}`,
+          slide_id: newSlideId,
+          document: JSON.parse(JSON.stringify(originalComp.document)),
+          revision: 1,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    data.projects.unshift(clonedProject);
+    data.slides.push(...clonedSlides);
+    data.compositions.push(...clonedComps);
+    this.save(data);
+
+    return {
+      project: clonedProject,
+      slides: clonedSlides,
+      compositions: clonedComps,
+    };
   }
 
   getProjectById(id: string) {
@@ -417,6 +512,23 @@ class DevDataStore {
     data.slides.push(...slides);
     data.compositions.push(...compositions);
     this.save(data);
+  }
+
+  getProject(id: string) {
+    const data = this.load();
+    return data.projects.find((p) => p.id === id) || null;
+  }
+
+  createProject(project: any) {
+    this.addProject(project, [], []);
+    return project;
+  }
+
+  createSlide(slide: any) {
+    const data = this.load();
+    data.slides.push(slide);
+    this.save(data);
+    return slide;
   }
 
   deleteProject(id: string): boolean {
@@ -520,6 +632,70 @@ class DevDataStore {
       jobs = jobs.filter((j: any) => j.project_id === projectId);
     }
     return jobs;
+  }
+
+  // Creative Chat Support
+  listCreativeConversations(orgId: string, clientId?: string): any[] {
+    const data = this.load();
+    let res = (data.creativeConversations || []).filter(c => c.organization_id === orgId);
+    if (clientId) res = res.filter(c => c.client_id === clientId);
+    return res.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  }
+
+  getCreativeConversation(id: string): any | null {
+    const data = this.load();
+    return (data.creativeConversations || []).find(c => c.id === id) || null;
+  }
+
+  saveCreativeConversation(conv: any): any {
+    const data = this.load();
+    if (!data.creativeConversations) data.creativeConversations = [];
+    const idx = data.creativeConversations.findIndex(c => c.id === conv.id);
+    if (idx >= 0) {
+      data.creativeConversations[idx] = { ...data.creativeConversations[idx], ...conv, updated_at: new Date().toISOString() };
+      this.save(data);
+      return data.creativeConversations[idx];
+    } else {
+      const newConv = {
+        id: conv.id || crypto.randomUUID(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...conv,
+      };
+      data.creativeConversations.unshift(newConv);
+      this.save(data);
+      return newConv;
+    }
+  }
+
+  listCreativeMessages(conversationId: string): any[] {
+    const data = this.load();
+    return (data.creativeMessages || [])
+      .filter(m => m.conversation_id === conversationId)
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  }
+
+  addCreativeMessage(msg: any): any {
+    const data = this.load();
+    if (!data.creativeMessages) data.creativeMessages = [];
+    const newMsg = {
+      id: msg.id || crypto.randomUUID(),
+      created_at: new Date().toISOString(),
+      ...msg,
+    };
+    data.creativeMessages.push(newMsg);
+    
+    // Atualiza timestamp da conversa
+    if (data.creativeConversations) {
+      const conv = data.creativeConversations.find(c => c.id === msg.conversation_id);
+      if (conv) {
+        conv.updated_at = new Date().toISOString();
+        if (msg.response_id) conv.last_response_id = msg.response_id;
+      }
+    }
+    
+    this.save(data);
+    return newMsg;
   }
 }
 

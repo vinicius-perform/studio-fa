@@ -1,7 +1,9 @@
 // src/app/api/health/route.ts
 import { NextResponse } from 'next/server';
 import { getServerEnv } from '@/config/env';
-import { getSupabaseAdminClient } from '@/lib/supabase/admin';
+
+// Depende de variáveis de ambiente em runtime; nunca pode ser pré-renderizada no build.
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const env = getServerEnv();
